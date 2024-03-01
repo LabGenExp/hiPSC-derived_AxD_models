@@ -1,0 +1,1108 @@
+---
+title: "Co-cultures Figures"
+author: "Zuzana"
+date: '2022-10-06'
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+# Import libraries
+```{r libraries}
+library(Seurat)
+library(Matrix)
+library(SeuratWrappers)
+#library(SoupX)
+library(ggplot2)
+library(scales)
+library(DT)
+library(dplyr)
+library(dittoSeq)
+#library(clustree)
+library(VennDiagram)
+library(data.table)
+library(gridExtra)
+library(RColorBrewer)
+library(lemon)
+library(EnhancedVolcano)
+library(viridis)
+library(ComplexHeatmap)
+library(org.Hs.eg.db)
+library(clusterProfiler)
+library(xlsx)
+library(enrichplot)
+library(ggvenn)
+library(reshape2)
+```
+
+```{r}
+subfunction1 <- function(test){
+  gene_list <- test$avg_log2FC * (-log10(test$p_val))
+  names(gene_list) <- rownames(test)
+  gene_list <- na.omit(gene_list)
+  keep <- is.finite(gene_list)
+  gene_list <- gene_list[keep]
+  gene_list <- sort(gene_list, decreasing = TRUE)
+  return(gene_list)
+}
+```
+
+Set correct idents to iN/iA/precursors
+```{r}
+# neurons
+seurat_iN <- readRDS("iN/seurat_iN_filtered_mt_rib.rds")
+seurat_iN <- SetIdent(seurat_iN, value = seurat_iN$sct_pca_res.0.2)
+seurat_iN <- RenameIdents(seurat_iN, "0" = "NEURO 1",
+                                     "1" = "NEURO 2",
+                                     "2" = "NEURO 3",
+                                     "3" = "NEURO 4")
+seurat_iN[["cell_type_3"]] <- seurat_iN@active.ident
+
+# iA
+seurat_iA <- readRDS("iPSC_iA/seurat_iA_filtered_mt_rib.rds")
+seurat_iA <- SetIdent(seurat_iA, value = seurat_iA$cell_type_3)
+seurat_iA <- RenameIdents(seurat_iA, "ASTRO_1" = "ASTRO 1",
+                                     "ASTRO_2" = "ASTRO 2",
+                                     "ASTRO_3" = "ASTRO 3",
+                                     "ASTRO_4" = "ASTRO 4")
+seurat_iA[["cell_type_4"]] <- seurat_iA@active.ident
+
+# precursors
+seurat_iPSC <- readRDS("iPSC_iA/seurat_iPSC_filtered_mt_rib.rds")
+
+# set sample ident
+seurat_celltype <- list("seurat_iN" = seurat_iN, "seurat_iA" = seurat_iA, "seurat_iPSC" = seurat_iPSC)
+for (so in 1:length(seurat_celltype)){
+  seurat_celltype[[so]] <- SetIdent(seurat_celltype[[so]], value = seurat_celltype[[so]]$Sample)
+  # seurat_celltype[[so]] <- RenameIdents(seurat_celltype[[so]],
+  #                    "Ctrl_wt" = "CTRL astroC/neuroC",
+  #                    "Ctrl_w_a" = "CTRL astroAxD/neuroC",
+  #                    "Ctrl_AxD" = "CTRL astroAxD/neuroAxD",
+  #                    "OGD_wt" = "OGD astroC/neuroC",
+  #                    "OGD_w_a" = "OGD astroAxD/neuroC",
+  #                    "OGD_AxD" = "OGD astroAxD/neuroAxD"
+  #                    )
+    seurat_celltype[[so]] <- RenameIdents(seurat_celltype[[so]],
+                     "Ctrl_wt" = "CTRL C/C",
+                     "Ctrl_w_a" = "CTRL AxD/C",
+                     "Ctrl_AxD" = "CTRL AxD/AxD",
+                     "OGD_wt" = "OGD C/C",
+                     "OGD_w_a" = "OGD AxD/C",
+                     "OGD_AxD" = "OGD AxD/AxD"
+                     )
+  seurat_celltype[[so]][["Sample"]] <- seurat_celltype[[so]]@active.ident
+}
+
+seurat_iN <- seurat_celltype[["seurat_iN"]]
+seurat_iN <- SetIdent(seurat_iN, value = seurat_iN$cell_type_3)
+seurat_iA <- seurat_celltype[["seurat_iA"]]
+seurat_iA <- SetIdent(seurat_iA, value = seurat_iA$cell_type_4)
+seurat_iPSC <- seurat_celltype[["seurat_iPSC"]]
+seurat_iPSC <- SetIdent(seurat_iPSC, value = seurat_iPSC$cell_type_5)
+```
+
+
+# Fig 1
+1B: UMAP
+```{r}
+seurat.object <- readRDS("seurat_all_merged_filtered_mt_rib.rds")
+DimPlot(seurat.object, group.by = "cell_type_joined", pt.size = 1)
+seurat.object@active.ident <- seurat.object$cell_type_joined
+seurat.object <- RenameIdents(seurat.object, 
+                              "EPCAM/CDH1" = "Precursors",
+                              "PRE-ASTRO" = "Precursors",
+                              "PRE-NEURO" = "Precursors",
+                              "DCX/STMN1" = "Precursors",
+                              "ASTRO_1" = "ASTRO 1",
+                              "ASTRO_2" = "ASTRO 2",
+                              "ASTRO_3" = "ASTRO 3",
+                              "ASTRO_4" = "ASTRO 4",
+                              "NEURO_1" = "NEURO 1",
+                              "NEURO_2" = "NEURO 2",
+                              "NEURO_3" = "NEURO 3",
+                              "NEURO_4" = "NEURO 4"
+                              )
+myCol <- c("#008000","#C6DBEF", "#6BAED6", "#2171B5", "#08306B","#FCBBA1", "#FC9272", "#EF3B2C", "#A50F15")
+
+seurat.object$clusters_1B <- Idents(seurat.object)
+
+p <- DimPlot(seurat.object, pt.size = 0.8, cols = myCol, label = F) + 
+  theme(legend.position = "none")
+ggsave("Fig1B_UMAPall.png", plot = p, device = "png", height = 6, width = 7)
+
+table(seurat.object@active.ident)
+```
+
+1C: Dotplot of markers
+```{r}
+seurat.object <- readRDS("seurat_all_merged_filtered_mt_rib.rds")
+seurat.object <- RenameIdents(seurat.object,
+                              "ASTRO 1" = "Astrocytes",
+                              "ASTRO 2" = "Astrocytes",
+                              "ASTRO 3" = "Astrocytes",
+                              "ASTRO 4" = "Astrocytes",
+                              "NEURO 1" = "Neurons", 
+                              "NEURO 2" = "Neurons", 
+                              "NEURO 3" = "Neurons", 
+                              "NEURO 4" = "Neurons")
+  
+seurat.object$clusters_1C <- seurat.object@active.ident
+seurat.object@active.assay <- "RNA"
+
+#saveRDS(seurat.object, "seurat_all_merged_filtered_mt_rib.rds")
+
+# markers <- FindAllMarkers(seurat.object, min.pct = 0.1, logfc.threshold = 0.25, only.pos = TRUE)
+# markers <- markers[markers$avg_log2FC > 1 & markers$p_val_adj < 0.05,]
+# write.csv(markers, "Fig1_broad_markers.csv")
+
+neuro <- c("GAP43","NEFL","NEFM","MAP2","DCX")
+astro <- c("VIM","S100B","FABP7","GFAP","CRYAB")
+precursors <- c("EPCAM","CDH1","CLDN7","KRT18","KRT8")
+gene.set <- c(precursors, astro, neuro)
+#gene.set <- unique(gene.set)
+
+seurat.object@active.ident <- factor(seurat.object@active.ident, levels = c("Precursors","Astrocytes","Neurons"))
+
+p.dot <- DotPlot(seurat.object, features = gene.set) +
+  scale_color_gradient(high = "#8c0052", low = "#e0e0e0") +
+  theme(axis.title = element_blank(),
+        axis.text.x = element_text(angle=60, vjust = 1, hjust =1),
+        legend.title = element_text(size = 10), legend.text = element_text(size = 10), 
+        legend.key.size = unit(0.5, "cm"), legend.text.align = 1, legend.title.align = 0, 
+        plot.margin = margin(r = 1, l = 0.25, t = 0.25, b = 0.25, unit = "cm"),
+        legend.margin = margin(t = 0, r = 0, l = 0, b = -0.25, unit = "cm"),
+        plot.title = element_text(size = 18,face = "plain", hjust = 0.5)) +
+  guides(colour = guide_colorbar(order = 1, title = "Scaled Average\nExpression"), 
+         size = guide_legend(order = 2, title = "Percent\nExpressed")) +
+  coord_flip()
+p.dot
+ggsave(p.dot,filename = "Fig1C_markers.png",device = "png", bg="white", width = 3.5, height = 5)
+```
+
+1D: Proportional barplot, main populations
+```{r}
+seurat.object <- SetIdent(seurat.object, value = seurat.object$Sample)
+seurat.object <- RenameIdents(seurat.object,
+                              "Ctrl_wt" = "CTRL astroC/neuroC",
+                              "Ctrl_w_a" = "CTRL astroAxD/neuroC",
+                              "Ctrl_AxD" = "CTRL astroAxD/neuroAxD",
+                              "OGD_wt" = "OGD astroC/neuroC",
+                              "OGD_w_a" = "OGD astroAxD/neuroC",
+                              "OGD_AxD" = "OGD astroAxD/neuroAxD")
+seurat.object$Sample <- seurat.object@active.ident
+
+myCol2 <- c("#00A7F3","#EC1C24","#0D9433")
+
+p <- dittoBarPlot(seurat.object, var = seurat.object$clusters_1C, group.by = "Sample", data.out = T)
+p[["data"]]$grouping <- factor(p[["data"]]$grouping, levels = c("OGD astroAxD/neuroAxD","OGD astroAxD/neuroC","OGD astroC/neuroC","CTRL astroAxD/neuroAxD","CTRL astroAxD/neuroC","CTRL astroC/neuroC"))
+p[["data"]]$percent100 <- p[["data"]]$percent * 100
+data <- p[["data"]]
+
+p.bar <- ggplot(data = data, aes(x = percent100, y = grouping, fill = label)) + geom_bar(stat = "identity",width = 0.8) +
+  theme_void() +
+  theme(axis.text.x = element_text(size = 12, face = "bold"),
+        axis.line.y = element_blank(), axis.ticks.y = element_blank(),
+        axis.title.x = element_text(size=12, vjust = -1.5),
+        axis.line.x = element_line(linewidth = 1, lineend = "square"),
+        axis.text.y = element_text(size=12, face = "bold", margin = margin(r = 0.2, unit = "cm"), hjust = 1), 
+        axis.ticks.x = element_line(size = 1),
+        axis.ticks.length.x = unit(0.25, "cm"),
+        plot.margin = margin(0,0,10,2, unit = "pt"),
+        legend.position = "none",
+        plot.title = element_blank()) +
+  coord_capped_cart(bottom = "both") +
+  scale_fill_manual(values = myCol2) +
+  xlab("Percent of Cells") +
+  scale_x_continuous(breaks = c(0,50,100)) 
+p.bar
+ggsave("Fig1D_barplotall.png", device = "png",bg="white", plot = p.bar, width = 5, height = 2)
+
+table(seurat.object$Sample)
+```
+
+1E: Proportional barplot, subpopulations
+```{r}
+# astrocytes
+myCol.a <- c("#C6DBEF", "#6BAED6", "#2171B5", "#08306B")
+p.a <- dittoBarPlot(seurat_iA, var = seurat_iA@active.ident, group.by = "Sample", data.out = T)
+p.a[["data"]]$grouping <- factor(p.a[["data"]]$grouping, levels = c("OGD astroAxD/neuroAxD","OGD astroAxD/neuroC","OGD astroC/neuroC","CTRL astroAxD/neuroAxD","CTRL astroAxD/neuroC","CTRL astroC/neuroC"))
+p.a[["data"]]$percent100 <- p.a[["data"]]$percent * 100
+data.a <- p.a[["data"]]
+
+p.a.bar <- ggplot(data = data.a, aes(x = percent100, y = grouping, fill = label)) + geom_bar(stat = "identity",width = 0.8) +
+  theme_void() +
+  theme(axis.text.x = element_text(size = 12, face = "bold"),
+        axis.line.y = element_blank(), axis.ticks.y = element_blank(),
+        axis.title.x = element_text(size=12, vjust = -1.5, margin = margin(0,0,10,0, unit = "pt")),
+        axis.line.x = element_line(size = 1, lineend = "square"),
+        axis.text.y = element_text(size=12, face = "bold", margin = margin(r = 0.2, unit = "cm"), hjust = 1), 
+        axis.ticks.x = element_line(size = 1),
+        axis.ticks.length.x = unit(0.25, "cm"),
+        plot.margin = margin(l=2,r=0,b=10,t=10, unit = "pt"), 
+        legend.position = "bottom", legend.direction = "horizontal",
+        legend.key.size = unit(0.3,"cm"), legend.title = element_blank(),
+        legend.text = element_text(size = 10),
+        plot.title = element_text(size = 14, hjust = 0.5, vjust = 4)) +
+  coord_capped_cart(bottom = "both") +
+  scale_fill_manual(values = myCol.a) +
+  xlab("Percent of Cells") +
+  scale_x_continuous(breaks = c(0,50,100)) +
+  ggtitle("iA clusters")
+p.a.bar
+#ggsave("Fig1E_barplot_iA.png", device = "png",bg="white", plot = p.a.bar, width = 5, height = 3)
+
+# neurons
+seurat_iN@active.ident <- seurat_iN$cell_type_3
+myCol.n <- c("#FCBBA1", "#FC9272", "#EF3B2C", "#A50F15")
+p.n <- dittoBarPlot(seurat_iN, var = seurat_iN@active.ident, group.by = "Sample", data.out = T)
+p.n[["data"]]$grouping <- factor(p.n[["data"]]$grouping, levels = c("OGD astroAxD/neuroAxD","OGD astroAxD/neuroC","OGD astroC/neuroC","CTRL astroAxD/neuroAxD","CTRL astroAxD/neuroC","CTRL astroC/neuroC"))
+p.n[["data"]]$percent100 <- p.n[["data"]]$percent * 100
+data.n <- p.n[["data"]]
+
+p.n.bar <- ggplot(data = data.n, aes(x = percent100, y = grouping, fill = label)) + geom_bar(stat = "identity",width = 0.8) +
+  theme_void() +
+  theme(axis.text.x = element_text(size = 12, face = "bold"),
+        axis.line.y = element_blank(), axis.ticks.y = element_blank(),
+        axis.title.x = element_text(size=12, vjust = -1.5, margin = margin(0,0,10,0, unit = "pt")),
+        axis.line.x = element_line(size = 1, lineend = "square"),
+        axis.text.y = element_text(size=12, face = "bold", margin = margin(r = 0.2, unit = "cm")), 
+        axis.ticks.x = element_line(size = 1),
+        axis.ticks.length.x = unit(0.25, "cm"),
+        plot.margin = margin(l=2,r=0,b=10,t=10, unit = "pt"), 
+        legend.position = "bottom", legend.direction = "horizontal", 
+        legend.key.size = unit(0.3,"cm"), legend.title = element_blank(),
+        legend.text = element_text(size = 10),
+        plot.title = element_text(size = 14, hjust = 0.5, vjust = 4)) +
+  coord_capped_cart(bottom = "both") +
+  scale_fill_manual(values = myCol.n) +
+  xlab("Percent of Cells") +
+  scale_x_continuous(breaks = c(0,50,100)) +
+  ggtitle("iN clusters")
+p.n.bar
+#ggsave("Fig1E_barplot_iN.png", device = "png",bg="white", plot = p.n.bar, width = 5, height = 3)
+
+ggsave("Fig1E_barplot_iA_iN.png", plot = egg::ggarrange(p.a.bar, p.n.bar + theme(axis.text.y = element_blank()), nrow = 1), device = "png", height = 3, width = 9.5)
+```
+
+1F: Violin GFAP
+```{r}
+seurat_iA <- readRDS("iPSC_iA/seurat_iA_filtered_mt_rib.rds")
+myCol.a <- c("#C6DBEF", "#6BAED6", "#2171B5", "#08306B")
+p <- VlnPlot(seurat_iA, features = "GFAP", cols = myCol.a, pt.size = 0) + NoLegend() +
+  coord_flip() +
+  theme(axis.text.x = element_text(angle = 0, size = 16),
+        axis.title.y = element_blank(),
+        axis.text.y = element_text(size = 16)) +
+  scale_x_discrete(limits = rev)
+ggsave("Fig1F_violin.png", plot = p, device = "png", height = 4, width = 3.5)
+```
+
+1G: ORA precursors
+```{r}
+seurat.object@active.ident <- seurat.object$clusters_1B
+seurat.object@active.assay <- "RNA"
+markers.precursors <- FindMarkers(seurat.object, ident.1 = "Precursors", min.pct = 0.1, logfc.threshold = 0.25)
+markers.precursors <- markers.precursors[abs(markers.precursors$avg_log2FC) > 1 & markers.precursors$p_val_adj < 0.05,]
+write(rownames(markers.precursors[markers.precursors$avg_log2FC > 1,]), "markers_precursors_UP.txt")
+write(rownames(markers.precursors[markers.precursors$avg_log2FC < -1,]), "markers_precursors_DOWN.txt")
+
+reg <- c("UP","DOWN")
+background <- rownames(seurat.object)
+ego.all <- list()
+for(i in reg){
+  gene.list <- as.vector(read.table(paste0("markers_precursors_",i,".txt"), header = F)[,1]) 
+      
+  ego <- enrichGO(gene       = gene.list,
+               universe      = background,
+               keyType       = "ALIAS",
+               OrgDb         = org.Hs.eg.db,
+               ont           = "ALL",
+               pAdjustMethod = "fdr",
+               pvalueCutoff  = 0.1,
+               qvalueCutoff  = 0.2,
+               readable      = TRUE,
+               minGSSize     = 3)
+  
+  ego <- simplify(ego)
+  ego.all[[i]] <- ego
+}
+saveRDS(ego.all, "precursors_ORA.rds")
+
+ego.all <- readRDS("Fig1_precursors_ORA.rds")
+out <- merge_result(ego.all)
+out@compareClusterResult <- out@compareClusterResult[order(out@compareClusterResult$p.adjust),]
+out@compareClusterResult <- out@compareClusterResult[out@compareClusterResult$Count > 5,]
+p <- dotplot(out, showCategory = 5, by = "GeneRatio", includeAll = F, label_format = 50) +
+  scale_color_gradient(low = "#8c0052", high = "#e0e0e0") +
+  theme_minimal() +
+  theme(axis.text = element_text(size = 16, colour = "black"),
+        axis.text.x = element_text(face = "bold"),
+        axis.title.x = element_blank(),
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.75)) + 
+  ggtitle("GO Terms Enrichment in Precursors")
+p
+ggsave(plot = p, filename = "Fig1G_precursors_ORA_dotplot.png", device = "png", bg = "white", height = 4.5, width = 8)
+```
+
+# Fig 2B,D,E
+```{r}
+df1 <- read.table("Fig2BD_data.txt", header = T, sep = ",")
+df2 <- read.table("Fig2E_data.txt", header = T, sep = ",")
+
+df1$condit <- factor(df1$condit, levels = c("astroC/neuroC","astroAxD/neuroC"))
+df2$condit <- factor(df1$condit, levels = c("astroC/neuroC","astroAxD/neuroC"))
+barplot_custom <- function(df,x,y,fill,SEM,title){
+  ggplot(data=df, aes(x=x,y=y,fill=fill)) + geom_bar(stat="identity", width = 0.7) +
+  geom_errorbar(aes(ymin=y-SEM, ymax=y+SEM), width=.2) +
+  theme_light() + 
+  theme(axis.title.x = element_blank(),
+        legend.position = "none",
+        axis.text = element_text(size = 11, colour = "black"),
+        axis.text.x = element_blank(),
+        axis.line = element_line(linewidth = 0.5),
+        axis.ticks = element_line(linewidth = 0.5, colour = "black"),
+        axis.ticks.x = element_blank()
+        ) +
+  scale_fill_manual(values = c("#4472C4","#FFC000")) +
+  ylab(title) +
+  scale_y_continuous(expand = c(0,0), limits = c(0,1.5*max(y)))
+}
+
+ggsave("Fig2_barplots.svg", device = "svg", width = 5, height = 4, plot = 
+  #gridExtra::grid.arrange(
+   cowplot::plot_grid(align = "v", nrow = 2,
+    barplot_custom(df1, x = df1$condit, y = df1$undif, fill = df1$condit, SEM = df1$undif_err, 
+                   title = expression("Undifferentiated cells/mm"^"2")) + annotate(geom = "text", label = "****",
+                                                                                   x = 2, y = 6.5),
+    barplot_custom(df1, x = df1$condit, y = df1$MAP2, fill = df1$condit, SEM = df1$MAP2_err, 
+                   title = expression("MAP2+ cells/mm"^"2")),
+    barplot_custom(df1, x = df1$condit, y = df1$Vim, fill = df1$condit, SEM = df1$Vim_err, 
+                   title = expression("Vimentin+ cells/mm"^"2")),
+    barplot_custom(df1, x = df1$condit, y = df1$GFAP, fill = df1$condit, SEM = df1$GFAP_err, 
+                   title = expression("GFAP+ cells/mm"^"2")),
+    barplot_custom(df2, x = df2$condit, y = df2$circ, fill = df2$condit, SEM = df2$circ_SEM, 
+                   title = "Circularity") + annotate(geom = "text", label = "****", x = 2, y = 0.22),
+    barplot_custom(df2, x = df2$condit, y = df2$perim, fill = df2$condit, SEM = df2$perim_SEM, 
+                   title = expression(paste("Perimeter (", mu, "m)"))) + annotate(geom = "text", label = "****", 
+                                                                               x = 2, y = 630)
+    ) %>% print()
+)
+```
+
+# Fig 3
+3A: Volcano iA and iN: astroC/neuroC - astroAxD/neuroC
+```{r}
+DE_tests <- readRDS("iPSC_iA/DEA_mt_rib/DE_iA.rds")
+DE_tests <- readRDS("iN/DEA_mt_rib/DE_iN.rds")
+res <- DE_tests[["Ctrl_wt-Ctrl_w_a"]]
+
+keyvals.colour <- ifelse(
+  res$avg_log2FC < -0.65 & res$p_val_adj < 0.05, '#5A7BC6',
+  ifelse(res$avg_log2FC > 0.65 & res$p_val_adj < 0.05, '#EB7321',
+         '#E7E7E7')) 
+names(keyvals.colour)[keyvals.colour == '#5A7BC6'] <- 'downregulated'
+names(keyvals.colour)[keyvals.colour == '#EB7321'] <- 'upregulated'
+names(keyvals.colour)[keyvals.colour == '#E7E7E7'] <- 'insignificant'
+
+top10up <- res[res$avg_log2FC > 0.65 & res$p_val_adj < 0.05,]
+top10up <- rownames(head(top10up[order(top10up$p_val_adj, decreasing = F),],10))
+top10down <- res[res$avg_log2FC < -0.65 & res$p_val_adj < 0.05,]
+top10down <- rownames(head(top10down[order(top10down$p_val_adj, decreasing = F),],10))
+
+p <- EnhancedVolcano(toptable = res,
+                     lab = rownames(res),
+                     selectLab = c(top10up,top10down,"GFAP"),
+                     x = 'avg_log2FC',
+                     y = 'p_val_adj',
+                     title = "iA: astroC/neuroC - astroAxD/neuroC",
+                     pCutoff = 0.05, 
+                     colAlpha = 0.7,
+                     colCustom = keyvals.colour,
+                     FCcutoff = 0.65, 
+                     labSize = 4.5,
+                     pointSize = 3,
+                     drawConnectors = T,
+                     maxoverlapsConnectors = Inf,
+                     min.segment.length = 0.1,
+                     cutoffLineType = "blank",
+                     arrowheads = F,
+                     caption = "|log2FC| > 0.65 and p-adj < 0.05") +
+  theme_light() +
+  theme(plot.subtitle = element_blank(), 
+        plot.caption = element_text(size = 10), 
+        plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+        panel.grid.minor = element_blank(), panel.grid.major = element_blank(),
+        axis.line = element_line(colour = "black", linewidth = 0.7, linetype = "solid"), 
+        axis.text = element_text(size = 14),
+        axis.title = element_text(size = 14),
+        axis.ticks = element_line(linewidth = 0.7, colour = "black"),
+        axis.ticks.length = unit(0.2, "cm"),
+        legend.position = "none") +
+  xlab(expression("Log"[2]*"FC")) +
+  guides(color = guide_legend(override.aes = list(size = 4)))
+p
+ggsave(plot = p, "Fig3A_volcano_iA.png", device = "png", width = 6, height = 5)
+ggsave(plot = p, "Fig3A_volcano_iN.png", device = "png", width = 6, height = 5)
+```
+
+3B: Heatmap 
+```{r}
+DE_tests <- list("iA" = readRDS("iPSC_iA/DEA_mt_rib/DE_iA.rds"),
+                 "iN" = readRDS("iN/DEA_mt_rib/DE_iN.rds"))
+goi_list <- list()
+for (i in 1:length(DE_tests)){
+  gene.lists.up <- lapply(DE_tests[[i]][c("Ctrl_wt-Ctrl_AxD","Ctrl_wt-Ctrl_w_a")], 
+                    function(x) x = x[(x$avg_log2FC > 0.65) & x$p_val_adj < 0.05,])
+  gene.lists.down <- lapply(DE_tests[[i]][c("Ctrl_wt-Ctrl_AxD","Ctrl_wt-Ctrl_w_a")], 
+                     function(x) x = x[(x$avg_log2FC < -0.65) & x$p_val_adj < 0.05,])
+  reference.gene.set.up <- Reduce(intersect,lapply(gene.lists.up, function(x) rownames(x)))
+  reference.gene.set.down <- Reduce(intersect,lapply(gene.lists.down, function(x) rownames(x)))
+  reference.gene.set <- c(reference.gene.set.up,reference.gene.set.down)
+  
+  goi_list[[names(DE_tests)[i]]] <- reference.gene.set
+}
+
+plot_data <- list() 
+seurat_celltype <- list("iA" = readRDS("iPSC_iA/seurat_iA_filtered_mt_rib.rds"),
+                        "iN" = readRDS("iN/seurat_iN_filtered_mt_rib.rds"))
+
+for (i in 1:(length(seurat_celltype))){
+  seurat_object <- seurat_celltype[[i]]
+  DefaultAssay(seurat_object) <- "RNA"
+  seurat_object <- SetIdent(seurat_object, value = "Sample")
+  seurat_object <- subset(seurat_object, ident = c("Ctrl_wt", "Ctrl_w_a", "Ctrl_AxD"))
+  seurat_object <- RenameIdents(seurat_object, "Ctrl_wt" = "astroC/neuroC",
+                                     "Ctrl_w_a" = "astroAxD/neuroC", 
+                                     "Ctrl_AxD" = "astroAxD/neuroAxD")
+ 
+  all.genes <- rownames(seurat_object)
+  seurat_object <- NormalizeData(seurat_object, normalization.method = "LogNormalize", scale.factor = 10000, assay = "RNA")
+  seurat_object <- ScaleData(seurat_object, features = all.genes, assay = "RNA")
+  
+  averages <- AverageExpression(seurat_object, return.seurat=TRUE)
+  plot_data[[i]] <- averages
+}
+
+plot_list <- lapply(seq_along(plot_data), function(x) DoHeatmap(plot_data[[x]], features = goi_list[[x]], draw.lines = F, group.bar = T,
+                                        angle = 0, group.bar.height = 0, hjust = 0.5, size = 0, 
+                                        group.colors = c("white","white","white")) + 
+         scale_fill_gradientn(colors = c("#E7E7E7","#EB7321")) + 
+         theme(axis.text.y = element_text(size = 15, color = "black"),
+               axis.text.x = element_text(size = 12, color = "black", angle = 90, vjust = 0.5, hjust = 1)) +
+         coord_flip() +
+         scale_x_discrete(limits = rev) +
+         guides(colour = "none")
+       )
+
+egg::ggarrange(plot_list[[1]],plot_list[[2]], nrow = 1, common.legend = T)
+
+ggsave("Fig3C_heatmap_iA.png", plot = p, device = "png", width = 14, height = 3)
+ggsave("Fig3_heatmap_iN.png", plot = p, device = "png", width = 7, height = 3)
+```
+
+3C: Interaction number and interaction strength difference
+```{r}
+cir1 <- netVisual_diffInteraction(cellchat.merged, weight.scale = T, arrow.size = 0.5, margin = 0.1)
+cir2 <- netVisual_diffInteraction(cellchat.merged, weight.scale = T, arrow.size = 0.5, margin = 0.1,
+                                  measure = "weight")
+svg("Fig3D_CellChat_circle.svg")
+  par(mfrow= c(2,1))
+  cir1
+  cir2
+dev.off()
+```
+
+3D: Information flow chart 
+```{r}
+gg6 <- rankNet(cellchat.merged, mode = "comparison", stacked = T, do.stat = TRUE, color.use = c("#7AA3CD","#D17480"))
+ggsave("Fig3E_CellChat_infflow.png",plot = gg6 + theme(legend.position = "none"), device = "png", width = 3, height = 5.5)
+```
+
+3E: Outgoing and incoming signaling in selected pathways
+```{r}
+object.list <- list("Ctrl_wt" = cellchat1, "Ctrl_w_a" = cellchat2)
+pathways.show <- c("FGF","TGFb","LIFR","ncWNT","NOTCH","EGF","RELN")
+i <- 1
+ht1 = netAnalysis_signalingRole_heatmap(object.list[[i]], pattern = "outgoing", signaling = pathways.show, title = names(object.list)[i], width = 6, height = 6)
+ht2 = netAnalysis_signalingRole_heatmap(object.list[[i+1]], pattern = "outgoing", signaling = pathways.show, title = names(object.list)[i+1], width = 6, height = 6)
+
+svg("Fig3F_CellChat_outgoing.svg")
+ComplexHeatmap::draw(ht1 + ht2, ht_gap = unit(1, "cm"))
+dev.off()
+
+ht3 = netAnalysis_signalingRole_heatmap(object.list[[i]], pattern = "incoming", signaling = pathways.show, title = names(object.list)[i], width = 6, height = 6, color.heatmap = "GnBu")
+ht4 = netAnalysis_signalingRole_heatmap(object.list[[i+1]], pattern = "incoming", signaling = pathways.show, title = names(object.list)[i+1], width = 6, height = 6, color.heatmap = "GnBu")
+
+svg("Fig3F_CellChat_incoming.svg")
+ComplexHeatmap::draw(ht3 + ht4, ht_gap = unit(1, "cm"))
+dev.off()
+```
+
+# Fig 4
+4B: Barplot
+```{r}
+df3 <- read.table("Fig4_data.txt", header = T, sep = ",")
+df3$condit <- factor(df3$condit, levels = c("astroC/neuroC","astroAxD/neuroC"))
+
+p <- ggplot(data=df3, aes(x=condit,y=AVG,fill=stressed)) + geom_bar(stat="identity", width = 0.7, position = position_dodge(preserve = "single")) +
+  geom_errorbar(aes(ymin=AVG-ERR, ymax=AVG+ERR), width=.2, position = position_dodge(.7)) +
+  theme_light() + 
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_text(size = 16),
+        legend.position = c(0.15,0.85),
+        legend.text = element_text(size = 14),
+        legend.title = element_blank(),
+        axis.text = element_text(size = 16, colour = "black"),
+        axis.line = element_line(linewidth = 1),
+        axis.ticks = element_line(linewidth = 1, colour = "black")
+        ) +
+  scale_fill_manual(values = c("#4472C4","#FF0000")) +
+  scale_y_continuous(expand = c(0,0), limits = c(0,1.2*max(df3$AVG))) +
+  ylab("Cell death (% LDH release)") + 
+  annotate(geom = "text", label = "***", x = 2, y = 12, size = 9)
+ggsave("Fig4B_barplots.png", plot = p, device = "png")
+```
+
+4C: Table Heatmap
+```{r}
+DE_iA <- readRDS("iPSC_iA/DEA_mt_rib/DE_iA.rds")
+DE_iN <- readRDS("iN/DEA_mt_rib/DE_iN.rds")
+DE_iPSC <- readRDS("iPSC_iA/DEA_mt_rib/DE_iPSC.rds")
+DE.list <- list(DE_iA,DE_iN,DE_iPSC)
+
+DEGs <- lapply(DE.list, function(x) x = lapply(x[c("Ctrl_wt-OGD_wt","Ctrl_w_a-OGD_w_a")], function(y) y = y[(abs(y$avg_log2FC) > 0.65) & y$p_val_adj < 0.05,]))
+names(DEGs) <- c("iA","iN","precursors")
+
+DEG.num <- unlist(lapply(DEGs, function(x) x = sapply(x, FUN = nrow)))
+
+dt <- cbind(c(0,4),c(0,8),c(1,14))
+colnames(dt) <- c("iN","iA","precursors")
+rownames(dt) <- c("astroC/neuroC","astroAxD/neuroC")
+
+dt <- melt(dt)
+dt$rel_value = dt$value/max(dt$value)
+
+htmap <- dt %>%
+    group_by(Var2) %>%
+    ggplot(aes(Var2,Var1)) +
+    geom_tile(aes(fill = rel_value), colour = "white") +
+    geom_text(aes(label = value), size = 8) +
+    scale_fill_gradient2(low = "#FCECEA", mid = "#f1a099", high = "#e34234", midpoint = 0.7) +
+    theme(panel.grid.major = element_blank(),
+                panel.grid.minor = element_blank(),
+                panel.background = element_rect(fill = "white"),
+                plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+                axis.text.y = element_text(size = 14, face = "bold", colour = "black"),
+                axis.text.x = element_text(hjust = 1, vjust = 1, size = 14, 
+                                           face = "bold", colour = "black", angle = 30),
+                axis.title = element_blank(),
+                axis.ticks = element_blank()) +
+    ggtitle("Number of DEGs") +
+    labs(fill = "Heatmap") +
+  NoLegend() +
+  scale_x_discrete(position = "bottom") +
+  coord_flip()
+htmap
+ggsave("Fig4C_heatmap.png",plot=htmap, device = "png", width = 3, height = 4)
+```
+
+4D: Information flow chart - corrected CTRL x OGD
+```{r}
+cellchat1 <- readRDS("CellChat/CTRL/Ctrl_wt_cellchat_processed.rds")
+cellchat2 <- readRDS("CellChat/OGD/OGD_wt_cellchat_processed.rds")
+cellchat.merged <- mergeCellChat(list(cellchat1,cellchat2), add.names = c("Ctrl_wt","OGD_wt"))
+
+gg6 <- rankNet(cellchat.merged, mode = "comparison", stacked = T, do.stat = TRUE, color.use = c("#7AA3CD","#D17480"))
+ggsave("Fig4D_CellChat_infflow.png",plot = gg6 + theme(legend.position = "none"), device = "png", width = 3, height = 5.5)
+```
+
+4E: Information flow chart - astroAxD/neuroC CTRL x OGD
+```{r}
+cellchat1 <- readRDS("CellChat/OGD/CTRL_w_a_processed_woAS4.rds")
+cellchat2 <- readRDS("CellChat/OGD/OGD_w_a_cellchat_processed.rds")
+cellchat.merged <- mergeCellChat(list(cellchat1,cellchat2), add.names = c("Ctrl_w_a","OGD_w_a"))
+
+gg6 <- rankNet(cellchat.merged, mode = "comparison", stacked = T, do.stat = TRUE, color.use = c("#7AA3CD","#D17480"))
+ggsave("Fig4E_CellChat_infflow.png",plot = gg6 + theme(legend.position = "none"), device = "png", width = 3, height = 5.5)
+```
+
+4F: Outgoing and incoming signaling in selected pathways, astroAxD/neuroC OGD
+```{r}
+cellchat2 <- readRDS("CellChat/OGD/OGD_w_a_cellchat_processed.rds")
+pathways.show <- c("ACTIVIN","TGFb","BMP","NRG")
+
+ht1 = netAnalysis_signalingRole_heatmap(cellchat2, pattern = "outgoing", signaling = pathways.show, title = "astroAxD/neuroC OGD - outgoing", width = 6, height = 4)
+
+svg("Fig4F_CellChat_outgoing.svg")
+ComplexHeatmap::draw(ht1)
+dev.off()
+
+ht3 = netAnalysis_signalingRole_heatmap(cellchat2, pattern = "incoming", signaling = pathways.show, title = "astroAxD/neuroC OGD - incoming", width = 6, height = 4, color.heatmap = "GnBu")
+
+svg("Fig4F_CellChat_incoming.svg")
+ComplexHeatmap::draw(ht3)
+dev.off()
+```
+
+4G,H: PDGF signaling in OGD astroC/neuroC
+```{r}
+cellchat2 <- readRDS("CellChat/OGD/OGD_wt_cellchat_processed.rds")
+
+pathways.show <- c("PDGF","NGL","NEGR")
+svg("Fig4G_CellChat_wt.svg")
+  netVisual_chord_gene(cellchat2, signaling = pathways.show, sources.use = c(1:9), 
+                       targets.use = c(1:9), lab.cex = 1.5,legend.pos.y = 15, 
+                       legend.pos.x = 10,big.gap = 20, small.gap = 10)
+dev.off()
+
+svg("Fig4H_CellChat_PDGF.svg")
+  netAnalysis_signalingRole_network(cellchat2, signaling = "PDGF", width = 8, height = 4, font.size = 10)
+dev.off()
+```
+
+#Supplement 1
+Supp 1B
+```{r}
+seurat_integrated <- readRDS("seurat_integrated.rds")
+seurat_integrated <- SetIdent(seurat_integrated, value = seurat_integrated$Sample)
+seurat_integrated <- RenameIdents(seurat_integrated,
+                   "Ctrl_wt" = "CTRL astroC/neuroC",
+                   "Ctrl_w_a" = "CTRL astroAxD/neuroC",
+                   "Ctrl_AxD" = "CTRL astroAxD/neuroAxD",
+                   "OGD_wt" = "OGD astroC/neuroC",
+                   "OGD_w_a" = "OGD astroAxD/neuroC",
+                   "OGD_AxD" = "OGD astroAxD/neuroAxD"
+                   )
+seurat_integrated[["Sample"]] <- seurat_integrated@active.ident
+
+vlnplotCustom <- function(features, intercept){
+  return(VlnPlot(seurat_integrated, features = features, pt.size = 0, group.by = "Sample") +
+           geom_hline(yintercept = intercept) +
+           NoLegend() +
+           theme(axis.title.x = element_blank(),
+                   plot.title = element_text(size = 12)))
+}
+
+ggsave("Supp_Fig1B_VlnQC.png", plot = egg::ggarrange(nrow = 3, #cowplot::plot_grid(align = "hv", nrow = 3, axis = "b", 
+  vlnplotCustom(features = "nCount_RNA", intercept = 2500) + theme(axis.text.x = element_blank()),
+  vlnplotCustom(features = "nFeature_RNA", intercept = 1500) + theme(axis.text.x = element_blank()),
+  vlnplotCustom(features = "percent.mt", intercept = 10) + theme(axis.text.x = element_text(size = 10))
+), device = "png", width = 5, height = 7)
+```
+
+Supp 1C
+```{r}
+seurat_annotated <- readRDS("seurat_annotated.rds")
+p4 <- DimPlot(seurat_annotated, group.by = "sct_pca_res.0.4", label = T, label.size = 6) + theme(plot.title = element_blank()) + NoLegend()
+ggsave("Supp_Fig1C_UMAP.png", plot = p4, device = "png", width = 5, height = 5) 
+```
+
+Supp 1D
+```{r}
+p5 <- FeaturePlot(seurat_annotated, features = c("percent.mt","MALAT1"), min.cutoff = "q70", max.cutoff = "q90",cols = c("#e0e0e0","#8c0052"), pt.size = 1.25, order = T, ncol = 1)
+ggsave("Supp_Fig1D_MALATmt.png", plot = p5, device = "png", width = 5, height = 10) 
+```
+
+# Supplement 2
+Supp A-C
+```{r}
+# A astrocytes
+DimPlot(seurat_iA)
+brewer.pal(9, "Blues")
+display.brewer.pal(9, "Blues")
+myCol <- c("#C6DBEF", "#6BAED6", "#2171B5", "#08306B")
+
+p <- DimPlot(seurat_iA, label = FALSE, repel = TRUE, pt.size = 2,
+             cols = myCol) +
+  theme_void() + 
+  NoLegend() + 
+  annotate("segment", x = -7, xend = -5.5, y = -6, yend = -6, colour = "black", size=0.75, arrow=arrow(type = "open")) +
+  annotate("segment", x = -7, xend = -7, y = -6, yend = -4.75, colour = "black", size=0.75, arrow=arrow(type = "open"))
+p 
+ggsave("Supp_Fig2A_UMAP_iA.png", plot = p, device = "png", width = 7, height = 7)
+
+q <- DimPlot(seurat_iA, label = FALSE, repel = TRUE, pt.size = 1, split.by = "Sample",
+             cols = myCol) +
+  theme_void() +
+  theme(text = element_text(size = 14))
+q 
+ggsave("Supp_Fig2A_UMAP_iA_split.png", plot = q, device = "png", width = 10, height = 3)
+
+`ASTRO 1` <- c("HSPB6","ITGA7","S100A2","CRLF1","RBP4")
+`ASTRO 2` <- c("GFAP","S100B","COL2A1","FABP7")
+`ASTRO 3` <- c("COL1A1","COL3A1","COL1A2","FN1")
+`ASTRO 4` <- c("TK1","NUSAP1","MKI67","CDK1")
+
+p.dot <- DotPlot(seurat_iA, features = c(`ASTRO 1`,`ASTRO 2`,`ASTRO 3`,`ASTRO 4`),
+                 cols = c("#f7f7f7","#2171B5")) +
+  theme(axis.title = element_text(size = 10),
+        axis.title.y = element_text(vjust = 2),
+        axis.text.x = element_text(angle=60, vjust = 1, hjust =1),
+        legend.title = element_text(size = 8), legend.text = element_text(size = 8), 
+        legend.key.size = unit(0.35, "cm"), legend.text.align = 1, legend.title.align = 0, 
+        plot.margin = margin(r = 1, l = 0.25, t = 0.25, b = 0.25, unit = "cm"),
+        legend.margin = margin(t = 0, r = 0, l = 0, b = -0.25, unit = "cm"),
+        plot.title = element_text(size = 14,face = "plain", hjust = 0.5)) +
+  guides(colour = guide_colorbar(order = 1, title = "Scaled Average\nExpression"), 
+         size = guide_legend(order = 2, title = "Percent\nExpressed")) +
+  xlab("Genes") + ylab("Cluster Identity") +
+  ggtitle("Astrocyte cluster markers")
+p.dot
+ggsave("Supp_Fig2A_marker_iA.png", device = "png", height = 3, width = 7, bg = "#FFFFFF")
+
+# B neurons
+DimPlot(seurat_iN)
+brewer.pal(9, "Reds")
+display.brewer.pal(9, "Reds")
+myCol <- c("#FCBBA1", "#FC9272", "#EF3B2C", "#A50F15")
+
+p <- DimPlot(seurat_iN, label = F, repel = TRUE, pt.size = 2,
+             cols = myCol, label.size = 5) +
+  theme_void() + 
+  NoLegend() + 
+  annotate("segment", x = -6, xend = -4.75, y = -5, yend = -5, colour = "black", size=0.75, arrow=arrow(type = "open")) +
+  annotate("segment", x = -6, xend = -6, y = -5, yend = -4, colour = "black", size=0.75, arrow=arrow(type = "open"))
+p 
+ggsave("Supp_Fig2B_UMAP_iN.png", plot = p, device = "png", width = 7, height = 7)
+
+q <- DimPlot(seurat_iN, label = FALSE, repel = TRUE, pt.size = 1, split.by = "Sample",
+             cols = myCol) +
+  theme_void() +
+  theme(text = element_text(size = 14))
+q 
+ggsave("Supp_Fig2B_UMAP_iN_split.png", plot = q, device = "png", width = 10, height = 3)
+
+`NEURO 1` <- c("FTL","SERF2","IGFBP2","TNFRSF12A","VIM","S100A11")
+`NEURO 2` <- c("SCG2","NNAT","PCSK1","SYT4","BDNF","STC1")
+`NEURO 3` <- c("PTH2","UCN","SCG5","TRH")
+`NEURO 4` <- c("PRPH","ISL1","PHOX2B","PCP4","IFI16","LINC00682")
+
+p.dot <- DotPlot(seurat_iN, features = c(`NEURO 1`,`NEURO 2`,`NEURO 3`,`NEURO 4`),
+                 cols = c("#f7f7f7","#A50F15")) +
+  theme(axis.title = element_text(size = 10),
+        axis.title.y = element_text(vjust = 2),
+        axis.text.x = element_text(angle=60, vjust = 1, hjust =1),
+        legend.title = element_text(size = 8), legend.text = element_text(size = 8), 
+        legend.key.size = unit(0.35, "cm"), legend.text.align = 1, legend.title.align = 0, 
+        plot.margin = margin(r = 1, l = 0.25, t = 0.25, b = 0.25, unit = "cm"),
+        legend.margin = margin(t = 0, r = 0, l = 0, b = -0.25, unit = "cm"),
+        plot.title = element_text(size = 14,face = "plain", hjust = 0.5)) +
+  guides(colour = guide_colorbar(order = 1, title = "Scaled Average\nExpression"), 
+         size = guide_legend(order = 2, title = "Percent\nExpressed")) +
+  xlab("Genes") + ylab("Cluster Identity") +
+  ggtitle("Neuron cluster markers")
+p.dot
+ggsave("Supp_Fig2B_marker_iN.png", device = "png", height = 3, width = 7, bg = "#FFFFFF")
+
+# C precursors
+DimPlot(seurat_iPSC)
+brewer.pal(9, "Greens")
+display.brewer.pal(9, "Greens")
+myCol <- c("#C7E9C0","#74C476","#238B45","#00441B")
+levels(seurat_iPSC) <- as.factor(c("EPCAM/CDH1", "PRE-ASTRO","PRE-NEURO","DCX/STMN1"))
+
+p <- DimPlot(seurat_iPSC, label = FALSE, repel = TRUE, pt.size = 2,
+             cols = myCol) +
+  theme_void() + 
+  NoLegend() + 
+  annotate("segment", x = -7, xend = -5.5, y = -5, yend = -5, colour = "black", size=0.75, arrow=arrow(type = "open")) +
+  annotate("segment", x = -7, xend = -7, y = -5, yend = -3.75, colour = "black", size=0.75, arrow=arrow(type = "open"))
+p 
+ggsave("Supp_Fig2C_UMAP_iPSC.png", plot = p, device = "png", width = 7, height = 7)
+
+q <- DimPlot(seurat_iPSC, label = FALSE, repel = TRUE, pt.size = 1, split.by = "Sample",
+             cols = myCol) +
+  theme_void() +
+  theme(text = element_text(size = 14))
+q 
+ggsave("Supp_Fig2C_UMAP_iPSC_split.png", plot = q, device = "png", width = 10, height = 3)
+
+#marker dotplot
+levels(seurat_iPSC) <- as.factor(c("EPCAM/CDH1", "PRE-ASTRO","PRE-NEURO","DCX/STMN1"))
+p.dot <- DotPlot(seurat_iPSC, features = c("CDH1","EPCAM","CLDN7","ITGA2","ITGA3",
+                                           "CHI3L2","MGP","S100A1","S100B","COL2A1",
+                                           "VIM",
+                                           "GPX1","VAMP8","GSTP1","CYTOR","PDLIM1",
+                                           "RTN1","STMN1","STMN2","DCX","GAP43","VGF"),
+                 cols = c("#f7f7f7","#238B45")) +
+  theme(axis.title = element_text(size = 10),
+        axis.title.y = element_text(vjust = 2),
+        axis.text.x = element_text(angle=60, vjust = 1, hjust =1),
+        legend.title = element_text(size = 8), legend.text = element_text(size = 8), 
+        legend.key.size = unit(0.35, "cm"), legend.text.align = 1, legend.title.align = 0, 
+        plot.margin = margin(r = 1, l = 0.25, t = 0.25, b = 0.25, unit = "cm"),
+        legend.margin = margin(t = 0, r = 0, l = 0, b = -0.25, unit = "cm"),
+        plot.title = element_text(size = 14,face = "plain", hjust = 0.5)) +
+  guides(colour = guide_colorbar(order = 1, title = "Scaled Average\nExpression"), 
+         size = guide_legend(order = 2, title = "Percent\nExpressed")) +
+  xlab("Genes") + ylab("Cluster Identity") +
+  ggtitle("Precursor cluster markers")
+p.dot
+ggsave(plot = p.dot, filename = "Supp_Fig2C_marker_iPSC.png", device = "png", height = 3, width = 7.5, bg = "#FFFFFF")
+```
+
+Supp 2D
+```{r}
+reference.gene.set <- c("GFAP","HSPB1","VIM","CRYAB","PLEC","SYNM","CCND2","SQSTM1") #Rosenthal fibers 
+seurat.object <- readRDS("iPSC_iA/seurat_iA_filtered_mt_rib.rds")
+seurat.object@active.assay <- "RNA"
+seurat.object.subset <- subset(seurat.object, subset = GFAP > 0, idents = "ASTRO_2")
+
+df <- as.data.frame(AverageExpression(seurat.object.subset, features = reference.gene.set, assays = "RNA", group.by = "Sample", slot = "scale.data"))
+
+colnames(df) <- c("CTRL AxD/AxD", "CTRL AxD/C", "CTRL C/C",
+                                  "OGD AxD/AxD", "OGD AxD/C", "OGD C/C")
+df <- df[,c(3,2,1,6,5,4)]
+mat <- as.matrix(df)
+
+svg("Supp_Fig2D_heatmap_RFs.svg", width = 4, height = 5)
+  draw(Heatmap(mat, col = circlize::colorRamp2(c(-1,0,3),c("blue","#eeeeee","red")),
+               column_title = "Rosenthal fiber genes - ASTRO 2 GFAP+",
+               column_title_gp = gpar(fontsize = 9, fontface = "bold"), 
+               cluster_rows = T, cluster_columns = F, show_row_dend = F, 
+               heatmap_legend_param = list(title = expression("Scaled\nexpression"))))
+dev.off()
+```
+
+Supp 2E
+```{r}
+seurat.object <- readRDS("seurat_all_merged_filtered_mt_rib.rds")
+seurat.object@active.assay <- "RNA"
+p <- FeaturePlot(seurat.object, features = c("SOX9","NFIB","NEUROG2"), pt.size = 0.5, min.cutoff = "q10", max.cutoff = "q90", ncol = 1, cols = c("#e0e0e0","#8c0052"), order = T) & NoLegend() 
+ggsave("Supp_Fig2E_precursor_origin.png", plot = p, device = "png", width = 3, height = 8)
+```
+
+# Supplement 3
+Supp 3A
+```{r}
+# cellchat 1 = wt, cellchat 2 = AxD 
+pathways.show <- c("FGF","TGFb","LIFR","ncWNT","NOTCH","EGF")
+plots <- lapply(pathways.show, function(x) netAnalysis_contribution(cellchat1, signaling = x, title = paste0("L-R pairs in ",x)))
+ggsave("Supp_Fig3A_wt_L-Rpairs.png", plot = egg::ggarrange(plots = plots), width = 7, height = 4)
+
+# Supp. 3B
+pathways.show <- c("ncWNT","NOTCH","EGF","RELN")
+plots <- lapply(pathways.show, function(x) netAnalysis_contribution(cellchat2, signaling = x, title = paste0("L-R pairs in ",x)))
+ggsave("Supp_Fig3B_wa_L-Rpairs.png", plot = egg::ggarrange(plots = plots), width = 7, height = 4)
+```
+
+Supp 3C
+```{r}
+gg6 <- rankNet(cellchat.merged, mode = "comparison", stacked = T, do.stat = TRUE, color.use = c("#7AA3CD","#D17480"))
+ggsave("Supp_Fig3C_CellChat_infflow.png",plot = gg6 + theme(legend.position = "none"), device = "png", width = 3, height = 5.5)
+```
+
+Supp 3D
+```{r}
+pathways.show <- c("FGF","TGFb","LIFR","ncWNT","NOTCH","EGF","RELN")
+ht1 = netAnalysis_signalingRole_heatmap(cellchat2, pattern = "outgoing", signaling = pathways.show, title = "AxD outgoing", width = 6, height = 6)
+
+svg("Supp_Fig3D_CellChat_outgoing.svg")
+ComplexHeatmap::draw(ht1)
+dev.off()
+
+ht3 = netAnalysis_signalingRole_heatmap(cellchat2, pattern = "incoming", signaling = pathways.show, title = "AxD incoming", width = 6, height = 6, color.heatmap = "GnBu")
+
+svg("Supp_Fig3D_CellChat_incoming.svg")
+ComplexHeatmap::draw(ht3)
+dev.off()
+```
+
+Supp 4A
+```{r}
+DE_iA <- readRDS("iPSC_iA/DEA_mt_rib/DE_iA.rds")[1:2]
+names(DE_iA) <- c("astroC/neuroC - astroAxD/neuroAxD",
+                  "astroC/neuroC - astroAxD/neuroC"
+                  )
+gene.lists <- lapply(DE_iA[c("astroC/neuroC - astroAxD/neuroAxD","astroC/neuroC - astroAxD/neuroC")], 
+                    function(x) x = x[(x$avg_log2FC > 0.65) & x$p_val_adj < 0.05,])
+gene.lists <- lapply(DE_iA[c("astroC/neuroC - astroAxD/neuroAxD","astroC/neuroC - astroAxD/neuroC")], 
+                     function(x) x = x[(x$avg_log2FC < -0.65) & x$p_val_adj < 0.05,])
+venn <- lapply(gene.lists, function(x) rownames(x))
+#venn.plot <- ggvenn(venn, fill_color = c("#EB7321","#EB7321"), fill_alpha = 0.4,
+venn.plot <- ggvenn(venn, fill_color = c("#5A7BC6","#5A7BC6"), fill_alpha = 0.4,
+                    set_name_size = 4.5, show_percentage = F, text_size = 7) + 
+  NoLegend()
+ggsave("Supp_Fig4A_Venn_up.png",plot = venn.plot, 
+       device = "png", bg = "white",
+       width = 6, height = 4)
+ggsave("Supp_Fig4A_Venn_down.png",plot = venn.plot, 
+       device = "png", bg = "white",
+       width = 6, height = 4)
+```
+
+Supp 4B
+```{r}
+DE_tests <- readRDS("iPSC_iA/DEA_mt_rib/DE_iA.rds")
+DE_tests <- readRDS("iN/DEA_mt_rib/DE_iN.rds")
+res <- DE_tests[["Ctrl_w_a-Ctrl_AxD"]]
+
+keyvals.colour <- ifelse(
+  res$avg_log2FC < -0.65 & res$p_val_adj < 0.05, '#5A7BC6',
+  ifelse(res$avg_log2FC > 0.65 & res$p_val_adj < 0.05, '#EB7321',
+         '#E7E7E7')) 
+names(keyvals.colour)[keyvals.colour == '#5A7BC6'] <- 'downregulated'
+names(keyvals.colour)[keyvals.colour == '#EB7321'] <- 'upregulated'
+names(keyvals.colour)[keyvals.colour == '#E7E7E7'] <- 'insignificant'
+
+top10up <- res[res$avg_log2FC > 0.65 & res$p_val_adj < 0.05,]
+top10up <- rownames(head(top10up[order(top10up$p_val_adj, decreasing = F),],10))
+top10down <- res[res$avg_log2FC < -0.65 & res$p_val_adj < 0.05,]
+top10down <- rownames(head(top10down[order(top10down$p_val_adj, decreasing = F),],10))
+
+p <- EnhancedVolcano(toptable = res,
+                     lab = rownames(res),
+                     selectLab = c(top10up,top10down,"GFAP"),
+                     x = 'avg_log2FC',
+                     y = 'p_val_adj',
+                     title = "iN: astroAxD/neuroC - astroAxD/neuroAxD",
+                     pCutoff = 0.05, 
+                     colAlpha = 0.7,
+                     colCustom = keyvals.colour,
+                     FCcutoff = 0.65, 
+                     labSize = 4.5,
+                     pointSize = 3,
+                     drawConnectors = T,
+                     maxoverlapsConnectors = Inf,
+                     min.segment.length = 0.1,
+                     cutoffLineType = "blank",
+                     arrowheads = F,
+                     caption = "|log2FC| > 0.65 and p-adj < 0.05") +
+  theme_light() +
+  theme(plot.subtitle = element_blank(), 
+        plot.caption = element_text(size = 10), 
+        plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+        panel.grid.minor = element_blank(), panel.grid.major = element_blank(),
+        axis.line = element_line(colour = "black", linewidth = 0.7, linetype = "solid"), 
+        axis.text = element_text(size = 14),
+        axis.title = element_text(size = 14),
+        axis.ticks = element_line(linewidth = 0.7, colour = "black"),
+        axis.ticks.length = unit(0.2, "cm"),
+        legend.position = "none") +
+  xlab(expression("Log"[2]*"FC")) +
+  guides(color = guide_legend(override.aes = list(size = 4)))
+p
+ggsave(plot = p, "Supp_Fig4B_volcano_iA.png", device = "png", width = 6, height = 5)
+ggsave(plot = p, "Supp_Fig4B_volcano_iN.png", device = "png", width = 6, height = 5)
+```
+
+Supp 4C
+```{r}
+gse <- readRDS("iA_GSEA.rds")
+gse@result <- gse@result[order(gse@result$p.adjust),]
+gse@result$Core_count <- sapply(strsplit(gse@result$core_enrichment,split = "/"), FUN = length)
+gse@result <- gse@result[gse@result$Core_count > 3,]
+p <- dotplot(gse, showCategory = 5, label_format = 50, split=".sign", orderBy = "GeneRatio") + facet_grid(.~.sign) +
+  scale_color_gradient(low = "#8c0052",high = "#e0e0e0") +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 16, colour = "black"),
+        axis.text.x = element_text(size = 12),
+        plot.title = element_text(size = 16, face = "bold"),
+        strip.text.x = element_text(size = 16, face = "bold"),
+        strip.background = element_rect(linetype = "blank",colour = "white",fill=c("#e7e7e7"), size=1.5)) + 
+  ggtitle("iA: GO Terms Enrichment")
+p
+ggsave(plot = p, filename = "Supp_Fig4C_iA_GSEA.png", device = "png", bg = "white", width = 10, height = 5)
+```
+
+Supp 4D
+```{r}
+DE_tests_list <- list(Precursors = readRDS("iPSC_iA/DEA_mt_rib/DE_iPSC.rds")[["Ctrl_w_a-OGD_w_a"]],
+                      iA = readRDS("iPSC_iA/DEA_mt_rib/DE_iA.rds")[["Ctrl_w_a-OGD_w_a"]],
+                      iN = DE_tests <- readRDS("iN/DEA_mt_rib/DE_iN.rds")[["Ctrl_w_a-OGD_w_a"]])
+
+select_labels <- list(iPSC = c("C4orf48","PCSK1N","SNHG9","SNHG25","SEC61G","NDUFA3","TMSB10","TCEB2","NDUFB1","UQCRQ","USMG5","UBL5","NAA38","MT2A"),
+                      iA = c("PCSK1N","HES4","C4orf48","KRT19","SNHG9","VGF","STMN1","WFDC2"),
+                      iN = c("FN1","THBS1","SPARC","PTH2"))
+
+volcano_custom <- function(title, labelGenes, DE_tests, plotFileName){
+  res <- DE_tests 
+  keyvals.colour <- ifelse(
+  res$avg_log2FC < -0.65 & res$p_val_adj < 0.05, '#5A7BC6',
+  ifelse(res$avg_log2FC > 0.65 & res$p_val_adj < 0.05, '#EB7321',
+         '#E7E7E7')) 
+  names(keyvals.colour)[keyvals.colour == '#5A7BC6'] <- 'downregulated'
+  names(keyvals.colour)[keyvals.colour == '#EB7321'] <- 'upregulated'
+  names(keyvals.colour)[keyvals.colour == '#E7E7E7'] <- 'insignificant'
+  
+  p <- EnhancedVolcano(toptable = res,
+                     lab = rownames(res),
+                     selectLab = labelGenes,
+                     x = 'avg_log2FC',
+                     y = 'p_val_adj',
+                     axisLabSize = 8,
+                     titleLabSize = 10,
+                     title = title,
+                     pCutoff = 0.05, 
+                     colAlpha = 0.7,
+                     colCustom = keyvals.colour,
+                     subtitleLabSize = 9,
+                     FCcutoff = 0.65, 
+                     labSize = 4.5,
+                     pointSize = 3,
+                     drawConnectors = T,
+                     maxoverlapsConnectors = Inf,
+                     min.segment.length = 0.1,
+                     arrowheads = FALSE,
+                     boxedLabels = F,
+                     cutoffLineType = "blank",
+                     caption = "|log2FC| > 0.65 and p-adj < 0.05") +
+  theme_light() +
+  theme(plot.subtitle = element_blank(), 
+        plot.caption = element_text(size = 10), 
+        plot.title = element_text(hjust = 0.5, vjust = 1, size = 13, face = "bold"),
+        panel.grid.minor = element_blank(), panel.grid.major = element_blank(),
+        axis.line = element_line(colour = "black", linewidth = 0.7, linetype = "solid"), 
+        axis.text = element_text(size = 14),
+        axis.title = element_text(size = 14),
+        axis.ticks = element_line(linewidth = 0.7, colour = "black"),
+        axis.ticks.length = unit(0.2, "cm"),
+        legend.position = "none") +
+  xlab(expression("Log"[2]*"FC")) +
+  guides(color = guide_legend(override.aes = list(size = 4)))
+  
+  ggsave(plot = p, filename = plotFileName, device = "png", width = 6, height = 5)
+  return(p)
+}
+
+lapply(seq_along(DE_tests_list), function(x) volcano_custom(DE_tests_list[[x]], 
+                                                            labelGenes = select_labels[[x]], 
+                                                            title = paste0(names(DE_tests_list)[x],": CTRL astroAxD/neuroC - OGD astroAxD/neuroC "), 
+                                                            plotFileName = paste0("Supp_Fig4D_",names(DE_tests_list)[x],"_volcano.png")))
+```
+
+Supp 4E
+```{r}
+DE.object <- readRDS("iPSC_iA/DEA_mt_rib/DE_iPSC.rds")
+
+gene.list <- subfunction1(DE.object[["Ctrl_w_a-OGD_w_a"]]) # create ranked gene list
+  
+gse <- gseGO(geneList=gene.list, 
+            ont ="ALL", 
+            keyType = "ALIAS", 
+            #nPermSimple = 10000, 
+            minGSSize = 3, 
+            maxGSSize = 800, 
+            pvalueCutoff = 0.1, 
+            verbose = TRUE, 
+            OrgDb = org.Hs.eg.db, 
+            pAdjustMethod = "BH",
+            by = "fgsea")
+gse <- simplify(gse)
+
+gse@result <- gse@result[order(gse@result$p.adjust),]
+gse@result$Core_count <- sapply(strsplit(gse@result$core_enrichment,split = "/"), FUN = length)
+gse@result <- gse@result[gse@result$Core_count > 3,]
+p <- dotplot(gse, showCategory = 5, label_format = 50, split=".sign", orderBy = "GeneRatio") + facet_grid(.~.sign) +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 15, colour = "black"),
+        axis.text.x = element_text(size = 12),
+        plot.title = element_text(size = 16, face = "bold"),
+        strip.text.x = element_text(size = 16, face = "bold"),
+        strip.background = element_rect(linetype = "blank",colour = "white",fill=c("#e7e7e7"), size=1.5)) + 
+  ggtitle("Precursors OGD: GO Terms Enrichment") +
+  scale_color_gradient(low = "#8c0052",high = "#e0e0e0")
+p
+ggsave(plot = p, filename = "Supp_Fig4E_precursors_GSEA_dotplot.png", device = "png", bg = "white", width = 9.5, height = 5)
+```
+
+

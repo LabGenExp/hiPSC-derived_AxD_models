@@ -1,0 +1,5 @@
+LibraryName,SampleName,Genotype,Cultivation,Condition,I7_Index_ID,index,I5_Index_ID,index2,Cell count CellDrop propidium iodide,Approx Cell count ,Loading volume,Expected number of cell in libraries
+Ctx-cr_S1,Ctx_cr,CTRL,Cortical,Ctx_cr,SI-I7-TS-A1,AATTTCGGGT,SI-I5-TS-A1,GAGGAGAGAG,1.27E+06,1200,13.8,11392
+Ctx-AxD_S2,Ctx_AxD,AxD,Cortical,Ctx_AxD,SI-I7-TS-B1,TATGACGAGT,SI-I5-TS-B1,CGAGAATCCT,9.80E+05,1000,16.5,10511
+CER-cr_S3,CER_cr,CTRL,Cerebral,CER_cr,SI-I7-TS-C1,TAGGGTCAAA,SI-I5-TS-C1,TTATTGCCTA,1.01E+06,1000,16.5,10832
+CER-AxD_S4,CER_AxD,AxD,Cerebral,CER_AxD,SI-I7-TS-D1,CTTCTAATGT,SI-I5-TS-D1,AGTGCGCACT,8.86E+05,800,20.6,11864

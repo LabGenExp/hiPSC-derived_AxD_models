@@ -1,0 +1,1790 @@
+---
+title: "scRNA-Seq"
+author: "Zuzana"
+date: 
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+# Packages
+Load required package
+
+```{r, message=FALSE, warning=FALSE, paged.print=TRUE}
+suppressMessages(library("scater"))
+suppressMessages(library("Matrix"))
+suppressMessages(library("NormExpression"))
+suppressMessages(library("DropletUtils"))
+suppressMessages(library("DESeq2"))
+suppressMessages(library("pheatmap"))
+suppressMessages(library("RColorBrewer"))
+suppressMessages(library("ggplot2"))
+suppressMessages(library("Seurat"))
+suppressMessages(library("sctransform"))
+suppressMessages(library("DT"))
+suppressMessages(library("scales"))
+suppressMessages(library("ggrepel"))
+suppressMessages(library("dplyr"))
+suppressMessages(library("SeuratWrappers"))
+suppressMessages(library("scmap"))
+suppressMessages(library("DoubletFinder"))
+suppressMessages(library("scCATCH"))
+suppressMessages(library("reshape2"))
+suppressMessages(library("Nebulosa"))
+library("SeuratObject")
+library("grid")
+library("gridExtra")
+library("dittoSeq")
+library("clustree")
+library("pals")
+library("EnhancedVolcano")
+library("ggpubr")
+library("clusterProfiler")
+```
+
+```{r}
+samples<-read.table("samples.csv",header=TRUE,sep=",")
+```
+
+# STAR
+```{r load_data, eval=FALSE, message = FALSE}
+STAR<-as.list(NULL)
+for(i in 1:nrow(samples)) {
+  folder <- paste0("../STAR/",samples$SampleName[i],"/",samples$SampleName[i],"Solo.out/Gene/raw/")
+  dims <- readr::read_delim(paste0(folder, "matrix.mtx"), delim = ' ', skip = 2, n_max = 1, col_names = FALSE)
+  t <- readr::read_delim(paste0(folder, "matrix.mtx"), delim = ' ', skip = 3, col_names = FALSE)
+  
+  cellbarcodes <- read.table(paste0(folder, "barcodes.tsv"))
+  genenames <- read.table(paste0(folder, "genes.tsv"))
+  dimnames <- as.list(NULL)
+  dimnames[[1]] <- as.character(genenames$V2)
+  dimnames[[2]] <- as.character(paste0(cellbarcodes$V1,"-",samples$SampleName[i]))
+  
+  STAR[[i]]<-as.list(NULL)
+  STAR[[i]][["RNA"]] <- Matrix::sparseMatrix(i = t$X1, j = t$X2, x = t$X3, dims = c(dims$X1, dims$X2), dimnames = dimnames)
+}
+```
+
+```{r, eval = FALSE}
+rm(cellbarcodes, dimnames, dims, genenames, t, i, folder)
+saveRDS(STAR,"STAR_raw.rds")
+```
+
+# EmptyDrops
+
+```{r, include = FALSE}
+STAR <- readRDS("STAR_raw.rds")
+```
+
+```{r eval=FALSE}
+p <- as.list(NULL)
+p_2 <- as.list(NULL)
+STAR.ED <- STAR
+
+pdf("knee_plots.pdf")
+for(i in 1:nrow(samples)) {
+  bcrank = barcodeRanks(STAR[[i]]$RNA, lower = 1000)
+  uniq = !duplicated(bcrank$rank)
+
+  knee_count <- paste0("Knee = ",table(bcrank$total >= metadata(bcrank)$knee)[2]," cells")
+  inflection_count <- paste0("Inflection = ",table(bcrank$total >= metadata(bcrank)$inflection)[2]," cells")
+  
+  p[[i]] <- qplot(bcrank$rank[uniq], bcrank$total[uniq], geom = "line") +
+    geom_hline(yintercept = metadata(bcrank)$knee, color = "blue", linetype = 2) +
+    geom_hline(yintercept = metadata(bcrank)$inflection, color = "darkgreen", linetype = 2) +
+    annotate("text", x = 10000, y = 1.5 * c(metadata(bcrank)$knee, metadata(bcrank)$inflection),
+           label = c(knee_count, inflection_count), color = c("blue", "darkgreen")) +
+    scale_x_log10() +
+    scale_y_log10() +
+    labs(x = "Barcode rank", y = "Total UMI count", title = samples$SampleName[i])
+  print(p[[i]])
+
+  e.out = emptyDrops(STAR[[i]]$RNA, lower = 1000, test.ambient = FALSE)
+  is.cell = (e.out$FDR <= 0.01)
+  w2kp = which(is.cell)
+
+  STAR.ED[[i]]$RNA = STAR[[i]]$RNA[,w2kp]
+  
+  bcrank.ED = barcodeRanks(STAR.ED[[i]]$RNA, lower = 1000)
+  
+  knee_count <- paste0("Knee = ",table(bcrank.ED$total >= metadata(bcrank.ED)$knee)[2]," cells")
+  inflection_count <- paste0("Inflection = ",table(bcrank.ED$total >= metadata(bcrank.ED)$inflection)[2]," cells")
+  
+  p_2[[i]] <- qplot(bcrank.ED$rank[!duplicated(bcrank.ED$rank)], bcrank.ED$total[!duplicated(bcrank.ED$rank)], geom = "line") +
+    geom_hline(yintercept = metadata(bcrank.ED)$knee, color = "blue", linetype = 2) +
+    geom_hline(yintercept = metadata(bcrank.ED)$inflection, color = "darkgreen", linetype = 2) +
+    annotate("text", x = 10, y = 1.5 * c(metadata(bcrank.ED)$knee, metadata(bcrank.ED)$inflection),
+           label = c(knee_count, inflection_count), color = c("blue", "darkgreen")) +
+    scale_x_log10() +
+    scale_y_log10() +
+    labs(x = "Barcode rank", y = "Total UMI count", title = paste0(samples$SampleName[i]," ",ncol(STAR.ED[[i]]$RNA)," cells"))
+  print(p_2[[i]])
+}
+dev.off()
+```
+
+```{r, eval = FALSE}
+rm(bcrank, e.out, i, inflection_count, is.cell, knee_count, uniq, w2kp)
+saveRDS(STAR.ED,"STAR_emptyDrops.rds")
+```
+
+```{r}
+STAR <- readRDS("STAR_emptyDrops.rds")
+```
+
+```{r Pictures_EmptyDrop_filtered, echo=FALSE, fig.height=3, fig.width=4}
+p_2 <- as.list(NULL)
+pdf("knee_plot_EmptyDrops.pdf")
+for(i in 1:nrow(samples)) {
+  bcrank = barcodeRanks(STAR[[i]]$RNA, lower = 2000)
+  uniq = !duplicated(bcrank$rank)
+  
+  knee_count <- paste0("Knee = ",table(bcrank$total >= metadata(bcrank)$knee)[2]," cells")
+  inflection_count <- paste0("Inflection = ",table(bcrank$total >= metadata(bcrank)$inflection)[2]," cells")
+  
+  p_2[[i]] <- qplot(bcrank$rank[uniq], bcrank$total[uniq], geom = "line") +
+    geom_hline(yintercept = metadata(bcrank)$knee, color = "blue", linetype = 2) +
+    geom_hline(yintercept = metadata(bcrank)$inflection, color = "darkgreen", linetype = 2) +
+    annotate("text", x = 10, y = 1.5 * c(metadata(bcrank)$knee, metadata(bcrank)$inflection),
+           label = c(knee_count, inflection_count), color = c("blue", "darkgreen")) +
+    scale_x_log10() +
+    scale_y_log10() +
+    labs(x = "Barcode rank", y = "Total UMI count", title = paste0(samples$SampleName[i]," ",ncol(STAR[[i]]$RNA)," cells"))
+  print(p_2[[i]])
+}
+dev.off()
+```
+
+# Seurat, QC
+```{r conversion, eval=FALSE, message=FALSE, warning=FALSE}
+seurat<-as.list(NULL)
+for(i in 1:nrow(samples)) {
+  seurat[[as.vector(samples$SampleName[i])]] <- CreateSeuratObject(counts = STAR[[i]][["RNA"]], assay = "RNA")
+  seurat[[i]]$Sample <- samples$SampleName[i]
+  seurat[[i]]$Condition <- samples$Condition[i]
+  seurat[[i]]$Genotype <- samples$Genotype[i]
+  seurat[[i]]$Cultivation <- samples$Cultivation[i]
+}
+```
+
+```{r eval=FALSE}
+rm(STAR, p, p_2, i)
+saveRDS(seurat,"seurat_emptyDrops.rds")
+```
+
+```{r eval=TRUE, include = FALSE}
+seurat <- readRDS("seurat_emptyDrops.rds")
+```
+
+```{r}
+# no probe for MALAT1 in fixed samples, mito is probably falsely mapped, and ribo is not there at all
+seurat_nomalat <- as.list(NULL)
+for(i in 1:nrow(samples)) {
+  seurat_nomalat[[i]] <- seurat[[i]][!(rownames(seurat[[i]]) %in% c(grep("^RP[LS]",rownames(seurat[[i]]),value = TRUE),
+                                                            grep("^MT-",rownames(seurat[[i]]),value = TRUE))), ]
+  seurat_nomalat[[i]]$largest_count <- apply(seurat_nomalat[[i]]@assays$RNA@counts, 2, max)
+  seurat_nomalat[[i]]$largest_index <- apply(seurat_nomalat[[i]]@assays$RNA@counts, 2, which.max)
+  seurat_nomalat[[i]]$largest_gene <- rownames(seurat_nomalat[[i]])[seurat_nomalat[[i]]$largest_index]
+  
+  seurat_nomalat[[i]]$percent.Largest.Gene <- 100 * seurat_nomalat[[i]]$largest_count / seurat_nomalat[[i]]$nCount_RNA
+  
+  seurat[[i]]$largest_gene <- seurat_nomalat[[i]]$largest_gene
+  seurat[[i]]$percent.Largest.gene <- seurat_nomalat[[i]]$percent.Largest.Gene
+}
+rm(seurat_nomalat)
+gc()
+```
+
+```{r calculate_mt_ribo, eval = TRUE}
+for(i in 1:nrow(samples)) {
+  seurat[[i]][["percent.mt"]] <- PercentageFeatureSet(seurat[[i]], pattern = "^MT-")
+}
+```
+
+```{r}
+pdf("QCplots.pdf", width = 14, height = 7)
+for(i in 1:nrow(samples)) {
+print(gridExtra::grid.arrange(
+  VlnPlot(seurat[[i]], features = c("nFeature_RNA"), pt.size = 0) + NoLegend() + theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) +
+    geom_hline(yintercept = 1200) + scale_y_log10(),
+  VlnPlot(seurat[[i]], features = c("nCount_RNA"), pt.size = 0) + NoLegend() + theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) +
+    geom_hline(yintercept = 2500) + scale_y_log10(),
+  VlnPlot(seurat[[i]], features = c("percent.mt"), pt.size = 0) + NoLegend() + theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) +
+    geom_hline(yintercept = 15),
+  VlnPlot(seurat[[i]], features = c("percent.Largest.gene"), pt.size = 0) + scale_y_log10() + NoLegend() + theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)),
+  ncol = 4, top = textGrob(names(seurat)[i]))
+  )
+}
+dev.off()
+```
+
+```{r}
+for(i in 1:nrow(samples)) {
+ print(names(seurat)[i])
+  largest_gene_list <- seurat[[i]]@meta.data %>%
+  group_by(largest_gene) %>%
+  count() %>%
+  arrange(desc(n))
+ print(largest_gene_list)
+ write.csv(largest_gene_list,paste0(names(seurat)[i],"_largest_gene_list.csv"))
+}
+```
+
+```{r eval=FALSE}
+rm(i,largest_gene_list)
+saveRDS(seurat,"seurat_QC.rds")
+```
+
+```{r eval = FALSE, include = FALSE}
+seurat <- readRDS("seurat_QC.rds")
+```
+
+```{r Transfromation, eval=FALSE, message=FALSE, warning=FALSE}
+all.genes <- rownames(seurat[[1]])
+seurat_transformed <- as.list(NULL)
+for(i in 1:nrow(samples)) {
+  seurat_transformed[[i]] <- SCTransform(seurat[[i]],verbose = TRUE, return.only.var.genes = TRUE,assay = "RNA", n_genes = NULL, variable.features.n = NULL)
+}
+```
+
+```{r eval=FALSE}
+rm(i,p,all.genes)
+saveRDS(seurat_transformed,"seurat_SCTransfrom.rds")
+```
+
+# Integration
+```{r eval = FALSE, include = FALSE}
+seurat_transformed <- readRDS("seurat_SCTransfrom.rds")
+```
+
+```{r Integration, eval=FALSE, message=FALSE, warning=FALSE}
+gc()
+all.genes <- rownames(seurat[[1]])
+options(future.globals.maxSize = 100 * 1024^3)
+seurat_features <- SelectIntegrationFeatures(object.list = seurat_transformed, nfeatures = 2000, fvf.nfeatures = 2000)
+seurat_features <- seurat_features[substr(seurat_features,1,3) != "MT-"]
+seurat_integrated <- PrepSCTIntegration(object.list = seurat_transformed, anchor.features = seurat_features, 
+    verbose = TRUE)
+seurat_Anchor <- FindIntegrationAnchors(object.list = seurat_integrated, normalization.method = "SCT", 
+    anchor.features = seurat_features, verbose = TRUE, dims = 1:30, max.features = 500, n.trees = 50)
+seurat_integrated <- IntegrateData(anchorset = seurat_Anchor, normalization.method = "SCT", 
+    verbose = TRUE, dims = 1:30)
+```
+
+```{r eval=FALSE}
+gc()
+#saveRDS(seurat_Anchor,"seurat_Anchor.rds")
+rm(seurat,seurat_Anchor,seurat_features,seurat_transformed,all.genes)
+saveRDS(seurat_integrated,"seurat_integrated.rds")
+```
+
+```{r, eval = FALSE}
+seurat_integrated <- readRDS("seurat_integrated.rds")
+```
+
+```{r PCA, eval = FALSE}
+all.genes <- row.names(seurat_integrated)
+seurat_integrated <- RunPCA(seurat_integrated, npcs = 50, verbose = FALSE, features = all.genes)
+ElbowPlot(seurat_integrated, ndims = 50, reduction = "pca")
+```
+
+```{r UMAP, eval = FALSE}
+seurat_integrated <- RunUMAP(seurat_integrated, reduction = "pca", dims = 1:20, verbose = TRUE)
+seurat_integrated <- FindNeighbors(seurat_integrated, reduction = "pca", dims = 1:20, verbose = TRUE)
+seurat_integrated <- FindClusters(seurat_integrated, resolution = 0.5, verbose = TRUE)
+```
+
+```{r eval=FALSE}
+saveRDS(seurat_integrated,"seurat_integrated_UMAP.rds")
+```
+
+```{r eval = TRUE, include = FALSE}
+seurat_integrated <- readRDS("seurat_integrated_UMAP.rds")
+```
+
+```{r pictures_plot, messages = FALSE, fig.width = 6, fig.height = 6}
+dim.plot <- DimPlot(seurat_integrated, reduction = "umap", label = TRUE)
+umap.rna <- FeaturePlot(seurat_integrated, features = c("nFeature_RNA","nCount_RNA"), min.cutoff = "q10", max.cutoff = "q90", ncol = 1, cols = c("gray","red"))
+ggsave("UMAP_all.png", plot = dim.plot)
+ggsave("umap_rna_QC.png", plot = umap.rna)
+```
+
+```{r}
+#VlnPlot(seurat_integrated, features = c("nFeature_RNA","nCount_RNA","percent.mt","percent.rib"), ncol = 1)
+pdf("QC_clusters.pdf")
+  print(VlnPlot(seurat_integrated, features = "nFeature_RNA", ncol = 1, pt.size = 0) + geom_hline(yintercept=1500) + geom_hline(yintercept=2000, color = "red") + NoLegend())
+  print(VlnPlot(seurat_integrated, features = "nCount_RNA", ncol = 1, pt.size = 0) + geom_hline(yintercept=2500) + ylim(2000,15000) + geom_hline(yintercept=3500, color = "red") + NoLegend())
+  print(VlnPlot(seurat_integrated, features = "GFAP", ncol = 1, pt.size = 0) + geom_hline(yintercept=0) + NoLegend())
+dev.off()
+```
+
+```{r, messages = FALSE, fig.width = 16}
+pdf("UMAP_samples.pdf", )
+  print(DimPlot(seurat_integrated, reduction = "umap", label = TRUE, split.by = "Sample"))
+  print(DimPlot(seurat_integrated, reduction = "umap", label = FALSE, group.by = "Sample", pt.size = 1))
+  dittoBarPlot(seurat_integrated, var = "seurat_clusters", group.by = "Condition")
+dev.off()
+```
+
+```{r}
+features_test <- c("NES","HSPB1","SYNM","CCDN2","SQSTM1","CRYAB",
+                   "SOX9","NFIB",      # ASTRO transformation
+                   "CD44","GJA1","S100B", #General ASTRO
+                   "GFAP","VIM",                      # Reactive ASTRO
+                   "EPCAM","CDH1","CLDN7",  #Maturated iPSC from fibroblats
+                   "SLC17A6","ISL1",
+                   "MAP2","SYP","DCX","STMN1","TH", #Neuronal
+                   "CCND2","SOX4",
+                   "MGP",
+                   "VCAN",
+                   "FABP7"
+                 )
+```
+
+```{r, fig.height=5, fig.width = 10}
+FeaturePlot(seurat_integrated, features = features_test, min.cutoff = "q10", max.cutoff = "q90", ncol = 6, cols = c("gray","red"))
+DotPlot(seurat_integrated, features = features_test) + theme(axis.text.x=element_text(angle=90, hjust = 1, vjust = 0.5))
+#FeaturePlot(seurat_integrated, features = "GFAP", min.cutoff = "q10", max.cutoff = "q90", cols = c("gray","red"))
+```
+
+# Markers
+```{r Markers_Identification, eval = FALSE}
+markers <- FindAllMarkers(seurat_integrated, min.pct = 0.8, only.pos = TRUE, verbose = TRUE, assay = "integrated")
+```
+
+```{r, eval = FALSE}
+saveRDS(markers,"markers.rds")
+write.csv(markers,"markers.csv")
+```
+
+```{r, eval = TRUE, include = FALSE}
+markers <- readRDS("markers.rds")
+```
+
+```{r}
+datatable(markers %>% group_by(cluster) %>% top_n(n = 15, wt = avg_log2FC))
+```
+
+# DoubletFinder
+```{r eval = TRUE, include = FALSE}
+seurat_integrated <- readRDS("seurat_integrated_UMAP.rds")
+```
+
+```{r, eval = FALSE}
+seurat_SCT <- NULL
+#Pre-process
+for(i in 1:nrow(samples)) {
+  seurat_SCT[[i]] <- seurat_integrated[,seurat_integrated$Sample == names(table(seurat_integrated$Sample))[i]]
+  seurat_SCT[[i]] <- RunPCA(seurat_SCT[[i]], npcs = 20, verbose = FALSE)
+  seurat_SCT[[i]] <- RunUMAP(seurat_SCT[[i]], dims = 1:20, verbose = FALSE)
+  Idents(seurat_SCT[[i]]) <- as.matrix(Idents(seurat_integrated))[row.names(as.matrix(Idents(seurat_SCT[[i]]))),]
+}
+```
+
+```{r eval=FALSE}
+saveRDS(seurat_SCT,"seurat_SCT_UMAP.rds")
+```
+
+```{r read_SCT_after_UMAP, eval = TRUE, include = FALSE}
+seurat_SCT <- readRDS("seurat_SCT_UMAP.rds")
+```
+
+```{r eval = FALSE, message=FALSE, warning=FALSE, include=TRUE}
+#pK Identification (no ground-truth)
+sweep.res.list <- as.list(NULL)
+sweep.stats <- as.list(NULL)
+bcmvn <- as.list(NULL)
+bcmvn_pK_value <- as.vector(NULL)
+p_bcmvn <- as.list(NULL)
+
+for(i in 1:length(table(seurat_integrated$Sample))) {
+  DefaultAssay(seurat_SCT[[1]]) <- "SCT"
+  suppressWarnings(sweep.res.list[[i]] <- paramSweep_v3(seurat_SCT[[i]], PCs = 1:20, sct = TRUE, num.cores = 1))
+  sweep.stats[[i]] <- summarizeSweep(sweep.res.list[[i]], GT = FALSE)
+  bcmvn[[i]] <- find.pK(sweep.stats[[i]])
+  
+  bcmvn_BC_value <- max(bcmvn[[i]]$BCmetric)
+  bcmvn_pK_value[i] <- as.numeric(as.vector(bcmvn[[i]][bcmvn[[i]]$BCmetric == bcmvn_BC_value,]$pK))
+}
+```
+
+```{r eval = FALSE}
+saveRDS(sweep.res.list,"DoubletFinder/sweep.res.list1.rds")
+saveRDS(sweep.stats,"DoubletFinder/sweep.stats1.rds")
+saveRDS(bcmvn_pK_value,"DoubletFinder/bcmvn_pK_value1.rds")
+saveRDS(bcmvn,"DoubletFinder/bcmvn1.rds")
+saveRDS(p_bcmvn,"DoubletFinder/p_bcmvn1.rds")
+```
+
+```{r read_pK_analysis, eval = TRUE, include = FALSE}
+bcmvn_pK_value <- readRDS("bcmvn_pK_value1.rds")
+bcmvn <- readRDS("bcmvn1.rds")
+```
+
+```{r print_pK_test, include = TRUE, eval = TRUE}
+pdf("DoubletFinder/pK_values.pdf")
+for(i in 1:length(table(seurat_integrated$Sample))) {
+  p <- qplot(as.numeric(as.vector(bcmvn[[i]]$pK)), bcmvn[[i]]$BCmetric, geom = "line") +
+    geom_vline(xintercept = bcmvn_pK_value[i], color = "red", linetype = 2) +
+    annotate("text",
+             x = if (bcmvn_pK_value[i] < 0.2) {
+               bcmvn_pK_value[i] + 0.05
+               } else {
+               bcmvn_pK_value[i] - 0.05
+               },
+             y = 100,
+             label = paste0("Optimal pK = ",bcmvn_pK_value[i]),
+             color = "red") +
+    labs(x = "pK", y = expression(BC[mvn]), title = names(table(seurat_integrated$Sample))[i])
+  print(p)
+}
+dev.off()
+```
+
+```{r, eval = FALSE}
+#Homotypic Doublet Proportion Estimate
+annotations <- as.list(NULL)
+homotypic.prop <- as.vector(NULL)
+nExp_poi <- as.vector(NULL)
+nExp_poi.adj <- as.vector(NULL)
+
+for(i in 1:length(table(seurat_integrated$Sample))) {
+  annotations[[i]] <- as.character(Idents(seurat_SCT[[i]]))
+  homotypic.prop[i] <- modelHomotypic(annotations[[i]])
+  nExp_poi[i] <- round(0.05*length(row.names(seurat_SCT[[i]]@meta.data)))  ## Assuming 5% doublet formation rate - estimated by 10x
+  nExp_poi.adj[i] <- round(nExp_poi[i]*(1-homotypic.prop[i]))
+}
+```
+
+```{r, eval = FALSE}
+rm(annotations,homotypic.prop)
+saveRDS(nExp_poi,"DoubletFinder/nExp_poi1.rds")
+saveRDS(nExp_poi.adj,"DoubletFinder/nExp_poi_adj1.rds")
+```
+
+```{r read_nExp, eval = TRUE, include = FALSE}
+nExp_poi <- readRDS("nExp_poi1.rds")
+nExp_poi.adj <- readRDS("nExp_poi_adj1.rds")
+```
+
+```{r eval=FALSE, message=FALSE, warning=FALSE}
+for(i in 1:length(table(seurat_integrated$Sample))) {
+  suppressWarnings(seurat_SCT[[i]] <- doubletFinder_v3(seurat_SCT[[i]], PCs = 1:10, pN = 0.25, pK = bcmvn_pK_value[i], nExp = nExp_poi[i],
+                                      reuse.pANN = FALSE, sct = TRUE))
+  suppressWarnings(seurat_SCT[[i]] <- doubletFinder_v3(seurat_SCT[[i]], PCs = 1:10, pN = 0.25, pK = bcmvn_pK_value[i], nExp = nExp_poi.adj[i],
+                                      reuse.pANN = paste0("pANN_0.25_",bcmvn_pK_value[i],"_",nExp_poi[i]), sct = TRUE))
+}
+```
+
+```{r eval=FALSE}
+saveRDS(seurat_SCT,"seurat_SCT_doubletFinder.rds")
+```
+
+```{r read_tables_with_doublets, eval=TRUE, include = FALSE}
+seurat_SCT <- readRDS("seurat_SCT_doubletFinder.rds")
+```
+
+```{r, eval = FALSE}
+seurat_dublets_all <- data.frame(NULL)
+
+for(i in 1:length(table(seurat_integrated$Sample))) {
+  seurat_dublets <- seurat_SCT[[i]]@meta.data[,colnames(seurat_SCT[[i]]@meta.data) == paste0("DF.classifications_0.25_",bcmvn_pK_value[i],"_",nExp_poi[i]) |
+    colnames(seurat_SCT[[i]]@meta.data) == paste0("DF.classifications_0.25_",bcmvn_pK_value[i],"_",nExp_poi.adj[i])]
+  colnames(seurat_dublets) <- c("Low Confidence","High Confidence")
+  seurat_dublets_all <- rbind(seurat_dublets_all,seurat_dublets)
+}
+
+seurat_integrated$Doublet <- c(apply(seurat_dublets_all,1,
+                                     function(x){
+                                       if(x[1]==x[2])
+                                         if(x[1]=="Singlet")
+                                           "Singlet"
+                                         else "Doublet - High Confidence"
+                                       else "Doublet - Low Confidence"}))
+```
+
+```{r eval=FALSE}
+gc()
+rm(bcmvn,bcmvn_BC_value,bcmvn_pK_value,i,nExp_poi,nExp_poi.adj,p,p_bcmvn,seurat_dublets,seurat_dublets_all,seurat_SCT,sweep.res.list,sweep.stats)
+saveRDS(seurat_integrated,"seurat_integrated_doubletFinder.rds")
+```
+
+```{r read_all_cells_RDS_with_doublets, eval=TRUE, include = FALSE}
+seurat_integrated <- readRDS("seurat_integrated_doubletFinder.rds")
+```
+
+```{r, fig.width = 10, fig.height = 8}
+pdf("DoubletFinder.pdf")
+  DimPlot(seurat_integrated, reduction = "umap", label = TRUE)
+  DimPlot(seurat_integrated, reduction = "umap", label = FALSE, group.by = "Doublet")
+  FeaturePlot(seurat_integrated, features = c("percent.mt","nCount_RNA","nFeature_RNA"), min.cutoff = "q10", max.cutoff = "q90", ncol = 2, cols = c("gray","red"))
+  DimPlot(seurat_integrated, reduction = "umap", label = FALSE, split.by = "Doublet")
+  seurat_integrated$Clusters <- Idents(seurat_integrated)
+  print(ggplot(data=seurat_integrated@meta.data, aes(Clusters)) +
+    geom_bar(aes(fill=Doublet), position="fill") +
+    theme(axis.text.x = element_text(angle = 90, hjust = 0.5, vjust = 0.5)) +
+    ylab('Proportion of cells'))
+
+  print(ggplot(data=seurat_integrated@meta.data, aes(Sample)) +
+    geom_bar(aes(fill=Doublet), position="fill") +
+    theme(axis.text.x = element_text(angle = 90, hjust = 0.5, vjust = 0.5)) +
+    ylab('Proportion of cells'))
+dev.off()
+```
+
+# Filtering for %MT-, nCount, nFeature, and Doublets, cell cycle scoring
+```{r}
+seurat_integrated <- readRDS("seurat_integrated_doubletFinder.rds")
+seurat_filtered <- subset(seurat_integrated, (Doublet != "Doublet - High Confidence") & (percent.mt < 15))
+
+VlnPlot(seurat_filtered, features = "percent.mt", pt.size = 0, group.by = "Sample")
+VlnPlot(seurat_filtered, features = "nCount_RNA", pt.size = 0, group.by = "Sample")
+VlnPlot(seurat_filtered, features = "nFeature_RNA", pt.size = 0, group.by = "Sample")
+DimPlot(seurat_filtered, group.by = "Doublet")
+
+saveRDS(seurat_filtered, "seurat_filtered.rds")
+
+all.genes <- row.names(seurat_filtered)
+seurat_filtered <- RunPCA(seurat_filtered, npcs = 50, verbose = FALSE, features = all.genes)
+ElbowPlot(seurat_filtered, ndims = 50, reduction = "pca")
+
+seurat_filtered <- RunUMAP(seurat_filtered, reduction = "pca", dims = 1:20, verbose = TRUE)
+seurat_filtered <- FindNeighbors(seurat_filtered, reduction = "pca", dims = 1:20, verbose = TRUE)
+seurat_filtered <- FindClusters(seurat_filtered, resolution = 0.5, verbose = TRUE)
+
+umap.all <- DimPlot(seurat_filtered, label = T)
+umap.split <- DimPlot(seurat_filtered, label = T, split.by = "Sample")
+ggsave("UMAP_all_filtered.png", plot = umap.all, device = "png")
+ggsave("UMAP_all_samples_filtered.png", plot = umap.split, device = "png", width = 10, height = 6)
+
+seurat_filtered <- NormalizeData(seurat_filtered, normalization.method = "LogNormalize", scale.factor = 10000, assay = "RNA")
+seurat_filtered <- ScaleData(seurat_filtered, features = all.genes, assay = "RNA")
+
+markers <- FindAllMarkers(seurat_filtered, min.pct = 0.8, only.pos = TRUE, verbose = TRUE, assay = "RNA")
+
+saveRDS(markers,"markers_filtered.rds")
+write.csv(markers,"markers_filtered.csv")
+
+datatable(markers %>% group_by(cluster) %>% top_n(n = 15, wt = avg_log2FC))
+
+saveRDS(seurat_filtered, "seurat_filtered_markers.rds")
+```
+
+cell cycle scoring
+```{r}
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+
+seurat_filtered <- CellCycleScoring(seurat_filtered, s.features = s.genes, g2m.features = g2m.genes, set.ident = FALSE)
+
+pdf("cell_cycle_score.pdf")
+DimPlot(seurat_filtered, reduction = "umap", label = FALSE, split.by = "Phase")
+dittoBarPlot(seurat_filtered, var = "Phase", group.by = "Sample", color.panel = c("red","green","blue"))
+dittoBarPlot(seurat_filtered, var = "Phase", group.by = "seurat_clusters", color.panel = c("red","green","blue"))
+dev.off()
+
+saveRDS(seurat_filtered, "seurat_filtered_CCscore.rds")
+```
+
+
+# Subset to cortical and cerebral organoids:
+Cerebral
+```{r}
+seurat_filtered <- readRDS("seurat_filtered.rds")
+seurat_subset <- subset(seurat_filtered, Cultivation == "Cerebral") 
+
+all.genes <- row.names(seurat_subset)
+seurat_subset <- NormalizeData(seurat_subset, normalization.method = "LogNormalize", scale.factor = 10000, assay = "RNA")
+seurat_subset <- ScaleData(seurat_subset, features = all.genes, assay = "RNA")
+seurat_subset <- SCTransform(seurat_subset, assay = "RNA", verbose = TRUE, return.only.var.genes = TRUE, n_genes = NULL, variable.features.n = NULL)
+
+seurat_subset <- RunPCA(seurat_subset, npcs = 50, verbose = FALSE, features = all.genes)
+ElbowPlot(seurat_subset, ndims = 50, reduction = "pca")
+
+seurat_subset <- RunUMAP(seurat_subset, reduction = "pca", dims = 1:20, verbose = TRUE)
+seurat_subset <- FindNeighbors(seurat_subset, reduction = "pca", dims = 1:20, verbose = TRUE)
+seurat_subset <- FindClusters(seurat_subset, resolution = 0.5, verbose = TRUE)
+
+umap.all <- DimPlot(seurat_subset, label = T)
+umap.split <- DimPlot(seurat_subset, label = T, split.by = "Sample")
+
+markers <- FindAllMarkers(seurat_subset, min.pct = 0.8, only.pos = TRUE, verbose = TRUE, assay = "RNA", min.diff.pct = 0.2)
+
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+seurat_subset <- CellCycleScoring(seurat_subset, s.features = s.genes, g2m.features = g2m.genes, set.ident = FALSE)
+
+pdf("cerebral/cell_cycle_score_cerebral.pdf")
+DimPlot(seurat_subset, reduction = "umap", label = FALSE, split.by = "Phase")
+dittoBarPlot(seurat_subset, var = "Phase", group.by = "Sample", color.panel = c("red","green","blue"))
+dittoBarPlot(seurat_subset, var = "Phase", group.by = "seurat_clusters", color.panel = c("red","green","blue"))
+dev.off()
+
+saveRDS(markers,"cerebral/markers_cerebral.rds")
+write.csv(markers,"cerebral/markers_cerebral.csv")
+
+ggsave("cerebral/UMAP_cerebral.png", plot = umap.all, device = "png")
+ggsave("cerebral/UMAP_cerebral_samples.png", plot = umap.split, device = "png", width = 10, height = 6)
+saveRDS(seurat_subset, "cerebral/seurat_subset_cerebral.rds")
+```
+
+Cortical
+```{r}
+seurat_filtered <- readRDS("seurat_filtered.rds")
+seurat_subset <- subset(seurat_filtered, Cultivation == "Cortical") 
+
+all.genes <- row.names(seurat_subset)
+seurat_subset <- NormalizeData(seurat_subset, normalization.method = "LogNormalize", scale.factor = 10000, assay = "RNA")
+seurat_subset <- ScaleData(seurat_subset, features = all.genes, assay = "RNA")
+seurat_subset <- SCTransform(seurat_subset, assay = "RNA", verbose = TRUE, return.only.var.genes = TRUE, n_genes = NULL, variable.features.n = NULL)
+
+seurat_subset <- RunPCA(seurat_subset, npcs = 50, verbose = FALSE, features = all.genes)
+ElbowPlot(seurat_subset, ndims = 50, reduction = "pca")
+
+seurat_subset <- RunUMAP(seurat_subset, reduction = "pca", dims = 1:20, verbose = TRUE)
+seurat_subset <- FindNeighbors(seurat_subset, reduction = "pca", dims = 1:20, verbose = TRUE)
+seurat_subset <- FindClusters(seurat_subset, resolution = 0.5, verbose = TRUE)
+
+umap.all <- DimPlot(seurat_subset, label = T)
+umap.split <- DimPlot(seurat_subset, label = T, split.by = "Sample")
+
+markers <- FindAllMarkers(seurat_subset, min.pct = 0.8, only.pos = TRUE, verbose = TRUE, assay = "RNA", min.diff.pct = 0.2)
+
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+seurat_subset <- CellCycleScoring(seurat_subset, s.features = s.genes, g2m.features = g2m.genes, set.ident = FALSE)
+
+pdf("cortical/cell_cycle_score_cortical.pdf")
+DimPlot(seurat_subset, reduction = "umap", label = FALSE, split.by = "Phase")
+dittoBarPlot(seurat_subset, var = "Phase", group.by = "Sample", color.panel = c("red","green","blue"))
+dittoBarPlot(seurat_subset, var = "Phase", group.by = "seurat_clusters", color.panel = c("red","green","blue"))
+dev.off()
+
+saveRDS(markers,"cortical/markers_cortical.rds")
+write.csv(markers,"cortical/markers_cortical.csv")
+
+ggsave("cortical/UMAP_cortical.png", plot = umap.all, device = "png")
+ggsave("cortical/UMAP_cortical_samples.png", plot = umap.split, device = "png", width = 10, height = 6)
+saveRDS(seurat_subset, "cortical/seurat_subset_cortical.rds")
+```
+
+Annotate neurons within neuronal clusters
+```{r}
+seurat_subset <- readRDS("cerebral/seurat_subset_cerebral.rds")
+seurat_subset3 <- subset(seurat_subset, idents = c("5","6","7","8","9","10","11","17","18","19"))
+
+all.genes <- row.names(seurat_subset3)
+seurat_subset3 <- NormalizeData(seurat_subset3, normalization.method = "LogNormalize", scale.factor = 10000, assay = "RNA")
+seurat_subset3 <- ScaleData(seurat_subset3, features = all.genes, assay = "RNA")
+seurat_subset3 <- SCTransform(seurat_subset3, assay = "RNA", verbose = TRUE, return.only.var.genes = TRUE, n_genes = NULL, variable.features.n = NULL)
+
+seurat_subset3 <- RunPCA(seurat_subset3, npcs = 50, verbose = FALSE, features = all.genes)
+ElbowPlot(seurat_subset3, ndims = 50, reduction = "pca")
+
+seurat_subset3 <- RunUMAP(seurat_subset3, reduction = "pca", dims = 1:20, verbose = TRUE)
+seurat_subset3 <- FindNeighbors(seurat_subset3, reduction = "pca", dims = 1:20, verbose = TRUE)
+seurat_subset3 <- FindClusters(seurat_subset3, resolution = 0.2, verbose = TRUE)
+
+umap <- DimPlot(seurat_subset3, label = T)
+ggsave("cerebral/UMAP_neuronal.png", umap, "png")
+
+markers <- FindAllMarkers(seurat_subset3, min.pct = 0.8, only.pos = TRUE, verbose = TRUE, assay = "RNA", min.diff.pct = 0.2)
+write.csv(markers, "cerebral/markers_neuronal.csv")
+
+FeaturePlot(seurat_subset3, features = c("MKI67","TH","PAX6","SATB2", "EOMES", "HOPX"), min.cutoff = "q10", max.cutoff ="q90") 
+
+saveRDS(seurat_subset3, "cerebral/seurat_neuronal_subset.rds")
+```
+
+# Cerebral annotation
+```{r}
+# mesenchymal-like/fibroblasts, clus0
+clus0 <- c("COL1A1","DCN","LUM","DLK1","PDGFRA")
+# ependymal/astrocytes
+clus1 <- c("GFAP","CLU","S100B","SLC1A3","FOXJ1")
+# satellite (muscle) cells
+clus2 <- c("MYF5","NOTCH3","PAX7","FN1","MEGF10")
+# pacreatic cells
+clus3 <- c("REG3G","CLPS","CTRB1","CTRB2","CPA2")
+# epithelial cells
+clus4 <- c("EPCAM","ELF3","KRT8","NDRG1","KRT18")
+# immature neurons
+clus5 <- c("NEUROD2","NEUROD6","NRXN1","GRIA2","DISP3")
+# peripheral neurons
+clus6 <- c("TH","GATA2","GATA3","PHOX2A","PHOX2B","PRPH","ISL1")
+# upper layer neurons
+clus7 <- c("NEUROD2","NEUROD6","GRIA2","SATB2","FOXG1")
+# VEGFA+ migrating? cells
+clus8 <- c("VEGFA","SLC2A3","DDIT4","ENO2","PFKFB3")
+# radial glia + oRG
+clus9 <- c("SOX2","PAX6","GLI3","FABP7","TNC")
+# intermediate progenitors
+clus10 <- c("EOMES","NNAT","DCX")
+# proliferating RG
+clus11 <- c("TOP2A","NUSAP1","MKI67","SOX2","PAX6")
+# proliferating satellite muscle cells
+clus12 <- c("TOP2A","NUSAP1","MKI67","NOTCH3","FN1")
+# mesothelial cells 
+clus13 <- c("LRRN4","UPK3B","DCN","LUM","SERPINB9")
+# mesenchymal-like cells/fibroblasts, ECM enriched
+clus14 <- c("LUM","DLK1","DCN","COL15A1","IGFBP3")
+# cardiac/skeletal muscle cells
+clus15 <- c("MYOG","MYH3","TNNT2","TNNT3","ACTN2")
+# choroid plexus
+clus16 <- c("TRPM3","CA2","HTR2C","TTR","IGFBP7")
+# immature neurons
+clus17 <- c("NEUROD2","NEUROD6","FABP7","NNAT","STMN2")
+# neuronal+mesenchymal-like markers -> doublets?
+clus18 <- c("NEUROD6","GRIA2","DCX","PDGFRA","LUM")
+# OPC
+clus19 <- c("OLIG1","OLIG2")
+
+markers.list <- c(clus0,clus1,clus2,clus3,clus4,
+                  clus5,clus6,clus7,clus8,clus9,
+                  clus10,clus11,clus12,clus13,clus14,
+                  clus15,clus16,clus17,clus18,clus19)
+markers.list <- unique(markers.list)
+```
+
+```{r}
+seurat_subset_cerebral <- readRDS("cerebral/seurat_subset_cerebral.rds")
+DimPlot(seurat_subset_cerebral, label = T) + NoLegend()
+seurat_subset_cerebral <- RenameIdents(seurat_subset_cerebral, 
+             "9" = "radial glia",
+             "11" = "proliferating radial glia",
+             "19" = "pre-OPCs",
+             "10" = "intermediate progenitors",
+             "5" = "immature neurons",
+             "17" = "immature neurons NEUROD2+ FABP7+",
+             "7" = "upper layer neurons",
+             "6" = "peripheral neurons",
+             "18" = "neuronal+mesenchymal-like cells",
+             "1" = "astrocytes",
+             "16" = "choroid plexus cells",
+             "0" = "mesenchymal-like cells/fibroblasts",
+             "14" = "mesenchymal-like cells/fibroblasts IGFBP3+ COL15A1+",
+             "13" = "mesothelial cells",
+             "2" = "satellite cells",
+             "12" = "proliferating satellite cells",
+             "15" = "cardiac/skeletal muscle cells",
+             "4" = "epithelial cells",
+             "3" = "pancreatic-like cells",
+             "8" = "stressed VEGFA+ cells"
+             )
+             
+seurat_subset_cerebral$clusters_annot <- seurat_subset_cerebral@active.ident
+p <- DimPlot(seurat_subset_cerebral, label = F, pt.size = 1) + NoLegend() 
+p <- LabelClusters(p, id = "ident",  fontface = "bold",size = 6,position = "nearest")
+
+markers.list.new <- c("PAX6","FABP7","SOX2",
+                      "OLIG1","EGFR","DLL3",
+                      "EOMES","NNAT","NEUROD2","NEUROD6","NRXN1","GRIA2","SATB2","FOXG1",
+                      "PHOX2B","PRPH","ISL1",
+                      "FOXJ1","GFAP","S100B",
+                      "TTR","TRPM3","CA2",
+                      "COL1A1","DCN","LUM","PDGFRA","COL15A1","IGFBP3",
+                      "MYF5","PAX7","FN1","MKI67","LRRN4","UPK3B","SERPINB9",
+                      "MYOG","MYH3","TNNT2","EPCAM","ELF3","KRT8", 
+                      "REG3G","CLPS","CTRB1",
+                      "VEGFA","DDIT4","SLC2A3")
+
+# levels(seurat_subset_cerebral) <- as.factor(c("mesenchymal-like/fibroblasts","mesenchymal-like/fibroblasts IGFBP3+ COL15A1+",
+# "satellite cells","proliferating satellite cells","mesothelial cells","cardiac/skeletal muscle",
+# "epithelial cells","pancreatic cells","radial glia","proliferating radial glia","OPC",
+# "intermediate progenitors","immature neurons NEUROD2+ FABP7+","immature neurons","upper layer neurons","neuronal+mesenchymal-like","VEGFA+ cells","peripheral neurons","choroid plexus","ependymal/astrocytes"))
+```
+
+```{r}
+seurat_subset_cerebral@active.assay <- "RNA"
+goi.astro <- c("GFAP","AQP4")
+goi.MG <- c("AIF1","TREM2")
+goi.OPC <- c("OLIG1","OLIG2")
+goi <- c(goi.astro,goi.MG,goi.OPC)
+
+ggsave("cerebral/small_pops.png", plot = FeaturePlot(seurat_subset_cerebral, features = goi), device = "png", height = 10, width = 7)
+
+nrow(seurat_subset_cerebral@meta.data[seurat_subset_cerebral$annot=="OPC" & seurat_subset_cerebral$Condition=="CER_cr",])
+```
+
+```{r}
+seurat_subset_cerebral <- readRDS("cerebral/seurat_subset_cerebral.rds")
+#palette <- alphabet(n = 20)
+palette <- c("#CC7A88", "#E6B8BF", "#B33E52","#54990F", "#78B33E","#A3CC7A", "#CFE6B8","#0F8299", "#3E9FB3", "#7ABECC", "#B8DEE6","#653EB3", "#967ACC", "#C7B8E6","#B3823E", "#99600F",  "#CCAA7A", "#E6D2B8","#666666", "#999999") # palette <- stepped()
+
+cluster_order <- match(levels(seurat_subset_cerebral), metaLevels("ident", seurat_subset_cerebral))
+p.p <- dittoBarPlot(seurat_subset_cerebral, var = "ident" , group.by = "Condition", 
+                    data.out = T, var.labels.reorder = cluster_order, color.panel = as.character(palette),main = "") 
+p.p[["data"]]$percent100 <- p.p[["data"]]$percent * 100
+data.p <- p.p[["data"]]
+
+table(seurat_subset_cerebral$Condition)
+```
+
+Fig. 5A
+```{r}
+p1 <- DimPlot(seurat_subset_cerebral, pt.size = 0.5, cols = as.character(c("#CC7A88", "#E6B8BF", "#B33E52","#54990F", "#78B33E","#A3CC7A", "#CFE6B8","#0F8299", "#3E9FB3", "#7ABECC", "#B8DEE6","#653EB3", "#967ACC", "#C7B8E6","#B3823E", "#99600F",  "#CCAA7A", "#E6D2B8", "#999999")),label = F,
+              cells = rownames(seurat_subset_cerebral@meta.data[seurat_subset_cerebral$Condition == "CER_cr",])) + 
+  NoLegend() +
+  xlim(-14,14) + ylim(-14,14) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  ggtitle("CTRL")
+p2 <- DimPlot(seurat_subset_cerebral, pt.size = 0.5,label = F, cols = as.character(palette),
+              cells = rownames(seurat_subset_cerebral@meta.data[seurat_subset_cerebral$Condition == "CER_AxD",])) + NoLegend() +
+  xlim(-14,14) + ylim(-14,14) + 
+  theme(plot.title = element_text(hjust = 0.5)) +
+  ggtitle("AxD")
+
+ggsave(filename = "230901_paper_figs/cerebral_UMAP.png", plot = grid.arrange(p1,p2,nrow = 2), device = "png",
+       height = 10, width = 6)
+
+data.p$label <- factor(data.p$label, levels = rev(levels(data.p$label)))
+# barplot to complement the legend
+p.p.bar2 <- ggplot(data = data.p, aes(x = count, y = label, fill = label)) + 
+  geom_bar(stat = "identity", width = 0.9, position = "dodge2") +
+  theme_void() +
+  scale_x_reverse(limits = c(2600,0), expand = c(0.05,0), breaks = c(500,1500,2500), position = "top") +
+  scale_y_discrete(position = "right") +
+  scale_fill_manual(values = rev(as.character(palette))) +
+  theme(axis.text.y = element_text(angle = 0, size = 11, hjust = 0, vjust = 0.3, 
+                                   margin = margin(l=3,unit="pt")),
+        axis.line.y = element_line(linewidth = 0.25, colour = "black"), 
+        axis.ticks.y = element_line(linewidth = 0.25, colour = "black"),
+        axis.line.x = element_line(linewidth = 0.25, colour = "black"),
+        axis.ticks.x = element_line(linewidth = 0.25, colour = "black"),
+        axis.ticks.length = unit(0.1, "cm"),
+        axis.text.x = element_text(angle = 0, size = 6, hjust = 0.5, vjust = 1.5, colour = "black"),
+        plot.margin = margin(r=0.7, b=0.5, t=0.5, l=0.5, unit="cm"),
+        legend.position = "none") 
+p.p.bar2 
+
+ggsave("230901_paper_figs/Fig5A_legendbar.png", p.p.bar2, device = "png", bg = "white", height = 6, width = 5)
+```
+
+Fig. 5B
+```{r}
+seurat_subset_cerebral@active.assay <- "RNA"
+goi <- c("PAX6","OLIG1","EOMES","FOXG1","ISL1","GFAP","TTR","DCN","TNNT2","EPCAM","CLPS","MKI67")
+p <- FeaturePlot(seurat_subset_cerebral, features = goi, cols = c("#e0e0e0","#8c0052"), pt.size = 0.7, order = T, min.cutoff = "q10", max.cutoff = "q90", ncol = 3) + theme(plot.title = element_text(size = 14, face = "bold", hjust =  0.5)) & NoAxes() + NoLegend()
+
+ggsave("230901_paper_figs/cerebral_goi2.png", p, height = 10, width = 9)
+
+q <- FeaturePlot(seurat_subset_cerebral, "GFAP", split.by = "Condition", min.cutoff = "q10", max.cutoff = "q90", pt.size = 0.7, order = T, cols = c("#e0e0e0","#8c0052"), ) & NoAxes()
+q
+ggsave("230901_paper_figs/cerebral_GFAP.png", q, height = 4, width = 8)
+```
+
+Fig. C
+```{r}
+# RG DEA
+DE_tests <- readRDS("cerebral/DEA_RG/CER_cr-CER_AxD.rds")
+res <- DE_tests[[1]]
+
+keyvals.colour <- ifelse(
+  (res$avg_log2FC < -0.65 | res$avg_log2FC > 0.65) & res$p_val_adj < 0.05, "#8c0052",
+         "#e0e0e0") 
+names(keyvals.colour)[keyvals.colour == "#8c0052"] <- 'significant'
+names(keyvals.colour)[keyvals.colour == "#e0e0e0"] <- 'insignificant'
+
+labs <- c("CLPS","MOXD1","PCDH11X","REG3G","DNER","RTN1","HOPX","PTN","DLK1","COL3A1","CHGB","CRABP1","GAP43","PHOX2B","CNTN1","TTR","STMN2","HAND2","RGS5","CCND1")
+
+p <- EnhancedVolcano(toptable = res,
+                     lab = rownames(res),
+                     selectLab = labs,
+                     x = 'avg_log2FC',
+                     y = 'p_val_adj',
+                     axisLabSize = 8,
+                     titleLabSize = 10,
+                     title = "CTRL - AxD",
+                     pCutoff = 0.05, 
+                     colAlpha = 0.7,
+                     colCustom = keyvals.colour,
+                     subtitleLabSize = 9,
+                     FCcutoff = 0.65, 
+                     labSize = 3,
+                     pointSize = 2.5,
+                     drawConnectors = T,
+                     maxoverlapsConnectors = Inf,
+                     min.segment.length = 0.1,
+                     arrowheads = FALSE,
+                     boxedLabels = F,
+                     cutoffLineType = "blank",
+                     caption = "|log2FC| > 0.65 and p-adj < 0.05") +
+  theme_light() +
+  theme(plot.subtitle = element_blank(), 
+        plot.caption = element_text(size = 10), 
+        plot.title = element_text(hjust = 0.5, size = 12),
+        panel.grid.minor = element_blank(), panel.grid.major = element_blank(),
+        axis.line = element_line(colour = "black", linewidth = 0.7, linetype = "solid"), 
+        axis.text = element_text(size = 12),
+        axis.title = element_text(size = 12),
+        axis.ticks = element_line(linewidth = 0.7, colour = "black"),
+        axis.ticks.length = unit(0.2, "cm"),
+        legend.position = "none") +
+  xlab(expression("Log"[2]*"FC")) +
+  guides(color = guide_legend(override.aes = list(size = 4)))
+p
+ggsave(plot = p, "CER_volcanoRG.png", device = "png", width = 4.5, height = 3.5)
+
+ego.results <- readRDS("cerebral/DEA_RG2/ORA_results.rds")
+out <- merge_result(ego.results)
+out@compareClusterResult <- out@compareClusterResult[order(out@compareClusterResult$p.adjust),]
+out@compareClusterResult <- out@compareClusterResult[out@compareClusterResult$Count > 3,]
+p <- dotplot(out, showCategory = 5, by = "GeneRatio", includeAll = F, label_format = 100) +
+  theme_minimal() +
+  theme(axis.text = element_text(size = 16, colour = "black"),
+        axis.text.x = element_text(face = "bold"),
+        axis.title.x = element_blank(),
+        plot.title = element_text(size = 16, face = "bold", hjust = 8)) + 
+  ggtitle("GO Terms Enrichment") +
+  scale_color_gradient(low = "#8c0052",high = "#e0e0e0") 
+p
+ggsave(plot = p, filename = "CER_ORA_RG.png", device = "png", bg = "white",
+       width = 8, height = 4)
+
+# neurons DEA
+DE_tests <- readRDS("cerebral_neuro_DEA/CER_cr-CER_AxD.rds")
+res <- DE_tests[[1]]
+
+keyvals.colour <- ifelse(
+  (res$avg_log2FC < -0.65 | res$avg_log2FC > 0.65) & res$p_val_adj < 0.05, "#8c0052",
+         "#e0e0e0") 
+names(keyvals.colour)[keyvals.colour == "#8c0052"] <- 'significant'
+names(keyvals.colour)[keyvals.colour == "#e0e0e0"] <- 'insignificant'
+
+labs <- c("CLPS","ZNF454","PCDH11X","REG3G","PCDHA2","SPINK1","ZNF229","ZNF717","PCDHA3","PCDHGA8","PCDHGB6","ABR","CCSER1","MSRA","PKIB","ANK3","TTR","RUNX1T1","ISLR2","H1F0")
+
+p <- EnhancedVolcano(toptable = res,
+                     lab = rownames(res),
+                     selectLab = labs,
+                     x = 'avg_log2FC',
+                     y = 'p_val_adj',
+                     axisLabSize = 8,
+                     titleLabSize = 10,
+                     title = "CTRL - AxD",
+                     pCutoff = 0.05, 
+                     colAlpha = 0.7,
+                     colCustom = keyvals.colour,
+                     subtitleLabSize = 9,
+                     FCcutoff = 0.65, 
+                     labSize = 3,
+                     pointSize = 2.5,
+                     drawConnectors = T,
+                     maxoverlapsConnectors = Inf,
+                     min.segment.length = 0.1,
+                     arrowheads = FALSE,
+                     boxedLabels = F,
+                     cutoffLineType = "blank",
+                     caption = "|log2FC| > 0.65 and p-adj < 0.05") +
+  theme_light() +
+  theme(plot.subtitle = element_blank(), 
+        plot.caption = element_text(size = 10), 
+        plot.title = element_text(hjust = 0.5, size = 12),
+        panel.grid.minor = element_blank(), panel.grid.major = element_blank(),
+        axis.line = element_line(colour = "black", linewidth = 0.7, linetype = "solid"), 
+        axis.text = element_text(size = 12),
+        axis.title = element_text(size = 12),
+        axis.ticks = element_line(linewidth = 0.7, colour = "black"),
+        axis.ticks.length = unit(0.2, "cm"),
+        legend.position = "none") +
+  xlab(expression("Log"[2]*"FC")) +
+  guides(color = guide_legend(override.aes = list(size = 4)))
+p
+ggsave(plot = p, "CER_volcanoNEUR.png", device = "png", width = 4.5, height = 3.5)
+
+ego.results <- readRDS("cerebral_neuro_DEA/ORA_results.rds")
+out <- merge_result(ego.results)
+out@compareClusterResult <- out@compareClusterResult[order(out@compareClusterResult$p.adjust),]
+out@compareClusterResult <- out@compareClusterResult[out@compareClusterResult$Count > 3,]
+p <- dotplot(out, showCategory = 5, by = "GeneRatio", includeAll = F, label_format = 40) +
+  theme_minimal() +
+  theme(axis.text = element_text(size = 16, colour = "black"),
+        axis.text.x = element_text(face = "bold"),
+        axis.title.x = element_blank(),
+        plot.title = element_text(size = 16, face = "bold", hjust = 2)) + 
+  ggtitle("GO Terms Enrichment") +
+  scale_color_gradient(low = "#8c0052",high = "#e0e0e0") 
+p
+ggsave(plot = p, filename = "CER_ORA_NEUR.png", device = "png", bg = "white",
+       width = 8, height = 4)
+```
+
+Supplementary Fig. 6C
+```{r}
+q.2 <- DotPlot(seurat_subset_cerebral,features = markers.list.new) +
+  theme(axis.text.x = element_text(angle = 40, vjust = 0.9, hjust = 0.9)) +
+  scale_color_gradient(high = "#8c0052",low = "#e0e0e0")
+ggsave("Supp_Fig6C_CERmarkers.png", plot = q.2, device = "png", bg = "white", width = 20, height = 6)
+```
+
+Supplementary Fig. 6E
+```{r}
+seurat.object <- seurat_subset_cerebral
+gene.set <- list("Glycolysis GO:0006096 Score" = as.vector(read.table("stressed_cells/glycolysisGO.txt", header = F)[,1]),
+                 "ER Stress GO:0034976 Score" = as.vector(read.table("stressed_cells/ERstressGO.txt", header = F)[,1]))
+
+stress_score <- function(seurat.object, genes, title){
+  seurat.scored <- AddModuleScore(seurat.object, features = list(genes), assay = "RNA", name = "reference_score_")
+  p <- FeaturePlot(seurat.scored, features = "reference_score_1", order = T,
+                   min.cutoff = "q70", max.cutoff = "q90", reduction = "umap") + 
+    ggtitle(title) + scale_color_gradient(high = "#8c0052",low = "#e0e0e0") 
+  print(p)
+  
+  return(p)
+}
+  
+stress_plots <- lapply(seq_along(gene.set), function(x) stress_score(seurat.object, gene.set[[x]], title = names(gene.set)[x]))  
+ggsave(filename = "Supp_Fig6E_CER_stressed_GOterms.png", plot = grid.arrange(grobs = stress_plots, nrow = 1), device = "png", width = 11, height = 5)
+```
+
+# Cortical annotation
+Cortical control clustering and pseudotime
+```{r}
+seurat_subset_cortical
+seurat_cortical_CTRLneurons <- subset(seurat_subset_cortical, Condition == "Ctx_cr")
+
+all.genes <- row.names(seurat_cortical_CTRLneurons)
+seurat_cortical_CTRLneurons <- NormalizeData(seurat_cortical_CTRLneurons, normalization.method = "LogNormalize", scale.factor = 10000, assay = "RNA")
+seurat_cortical_CTRLneurons <- ScaleData(seurat_cortical_CTRLneurons, features = all.genes, assay = "RNA")
+seurat_cortical_CTRLneurons <- SCTransform(seurat_cortical_CTRLneurons, assay = "RNA", verbose = TRUE, return.only.var.genes = TRUE, n_genes = NULL, variable.features.n = NULL)
+
+seurat_cortical_CTRLneurons <- RunPCA(seurat_cortical_CTRLneurons, npcs = 50, verbose = FALSE, features = all.genes)
+ElbowPlot(seurat_cortical_CTRLneurons, ndims = 50, reduction = "pca")
+
+seurat_cortical_CTRLneurons <- RunUMAP(seurat_cortical_CTRLneurons, reduction = "pca", dims = 1:20, verbose = TRUE)
+seurat_cortical_CTRLneurons <- FindNeighbors(seurat_cortical_CTRLneurons, reduction = "pca", dims = 1:20, verbose = TRUE)
+seurat_cortical_CTRLneurons <- FindClusters(seurat_cortical_CTRLneurons, resolution = 0.3, verbose = TRUE)
+
+umap <- DimPlot(seurat_cortical_CTRLneurons, label = T)
+ggsave("cortical/UMAP_CTRLneuronal.png", umap, "png")
+
+markers <- FindAllMarkers(seurat_cortical_CTRLneurons, min.pct = 0.8, only.pos = TRUE, verbose = TRUE, assay = "RNA")
+write.csv(markers, "cortical/markers_CTRLneuronal.csv")
+
+FeaturePlot(seurat_cortical_CTRLneurons, features = c("MKI67","LHX6","PAX6","GAP43", "HOPX"), min.cutoff = "q10", max.cutoff ="q90") 
+
+saveRDS(seurat_cortical_CTRLneurons, "cortical/seurat_cortical_CTRLneurons.rds")
+```
+
+Cortical annotation, not integrated
+```{r}
+seurat_subset_cortical <- readRDS("cortical/seurat_subset_cortical.rds")
+DimPlot(seurat_subset_cortical, label = T) + NoLegend()
+seurat_subset_cortical <- RenameIdents(seurat_subset_cortical, 
+             "0" = "neurons 3",
+             "1" = "neurons 1",
+             "2" = "AxD neurons",
+             "3" = "AxD progenitors",
+             "4" = "mesenchymal-like",
+             "5" = "cardiac/skeletal muscle",
+             "6" = "neurons 2",
+             "7" = "proliferating mesenchymal-like",
+             "8" = "cycling progenitors",
+             "9" = "proliferating AxD progenitors",
+             "10" = "transitioning cells",
+             "11" = "oRG",
+             "12" = "cortical interneurons",
+             "13" = "pyramidal neurons",
+             "14" = "fibroblasts",
+             "15" = "SPARCL1+ AxD cluster",
+             "16" = "CRABP1+ VIM+ AxD cluster")
+
+palette <- alphabet()
+palette <- palette[c(1,2,3,7,8,9,10,11,12,13,15,16,17,18,19,20,22)]
+p <- DimPlot(seurat_subset_cortical, label = F, pt.size = 1, cols = as.character(palette)) + NoLegend() 
+p <- LabelClusters(p, id = "ident",  fontface = "bold",size = 6)
+ggsave("cortical/UMAP_cortical_annot2.png",plot = p, device = "png", width = 12, height = 12)
+
+p.2 <- DimPlot(seurat_subset_cortical, group.by = "Condition", label = F)
+ggsave("cortical/UMAP_sample.png", plot = p.2, width = 7, height = 5)
+
+table(seurat_subset_cortical$Condition)
+
+markers.list.new <- c("DCN","COL1A1","MKI67","FN1","LUM","PDGFRA",
+                      "TIMP1","HSPA1B","CRYAB",
+                      "MYH3","MYOG",
+                      "HES5","PAX6","SOX2",
+                      "HES6","ASCL1","GSX2","FABP7",
+                      "MOXD1","FAM107A","TNC",
+                      "FOXG1","DLX2","NNAT","NRXN1","DCX","GAD1","GDAP1","STMN2",
+                      "BCL11B","GRIA2",
+                      "NXPH1","LHX6",
+                      "NEUROD2","NEUROD6","TBR1",
+                      "GAP43","GRIA2","STMN2",
+                      "CLU","ATP1A2","SPARCL1",
+                      "CRABP1","NR2F1")
+markers.list.new <- unique(markers.list.new)
+
+levels(seurat_subset_cortical) <- as.factor(c("mesenchymal-like","proliferating mesenchymal-like","fibroblasts","transitioning cells","cardiac/skeletal muscle",
+"AxD progenitors","proliferating AxD progenitors","cycling progenitors","oRG",
+"neurons 1","neurons 2","neurons 3",
+"cortical interneurons","pyramidal neurons","AxD neurons",
+"SPARCL1+ AxD cluster","CRABP1+ VIM+ AxD cluster"))
+q.2 <- DotPlot(seurat_subset_cortical,features = markers.list.new) +
+  theme(axis.text.x = element_text(angle = 40, vjust = 0.9, hjust = 0.9))
+q.2
+ggsave("cortical/markers_dotplot2.png", plot = q.2, device = "png", bg = "white", width = 20, height = 6)
+```
+
+Pollen 2015 radial glia
+```{r}
+dir <- dir("reference_datasets/Pollen2015/", pattern = ".txt")
+dir.link <- "reference_datasets/Pollen2015/"
+
+pdf("cortical/neurons_Pollen2015_RG.pdf", width = 15, height = 15)
+for(i in 1:length(dir)){
+  gene.set <- as.vector(read.table(paste0(dir.link,dir[i]), header = T)[,1])
+  seurat.scored <- AddModuleScore(seurat_cortical_CTRLneurons, features = list(gene.set), assay = "RNA", name = "reference_score_")
+  p <- FeaturePlot(seurat.scored, features = "reference_score_1", 
+                   min.cutoff = "q10", max.cutoff = "q90", reduction = "umap") +
+    ggtitle(dir[i])
+  print(p)
+}
+dev.off()
+
+pdf("cortical/Pollen2015_RG.pdf", width = 15, height = 15)
+for(i in 1:length(dir)){
+  gene.set <- as.vector(read.table(paste0(dir.link,dir[i]), header = T)[,1])
+  seurat.scored <- AddModuleScore(seurat_subset_cortical, features = list(gene.set), assay = "RNA", name = "reference_score_")
+  p <- FeaturePlot(seurat.scored, features = "reference_score_1", 
+                   min.cutoff = "q10", max.cutoff = "q90", reduction = "umap") +
+    ggtitle(dir[i])
+  print(p)
+}
+dev.off()
+```
+
+Polioudakis2019's annotation
+```{r}
+dir <- dir("reference_datasets/Polioudakis2019/all/", pattern = ".txt")
+dir.link <- "reference_datasets/Polioudakis2019/all/"
+
+pdf("cortical/Polioudakis_all_neurons_overlap.pdf", width = 10, height = 10)
+for(i in 1:length(dir)){
+  gene.set <- as.vector(read.table(paste0(dir.link,dir[i]), header = T)[,1])
+  seurat.scored <- AddModuleScore(seurat_cortical_CTRLneurons, features = list(gene.set), assay = "RNA", name = "reference_score_")
+  p <- FeaturePlot(seurat.scored, features = "reference_score_1", 
+                   min.cutoff = "q10", max.cutoff = "q90", reduction = "umap") +
+    ggtitle(dir[i])
+  print(p)
+}
+dev.off()
+```
+
+# Subset for DEA
+```{r}
+seurat_subset <- readRDS("cortical/seurat_subset_cortical.rds")
+
+#cerebral
+seurat_subset <- seurat_subset_cerebral
+seurat_subset1 <- subset(seurat_subset, idents = c("10","17","5","7","18")) # neuro
+seurat_subset1a <- subset(seurat_subset, subset = seurat_clusters %in% c("10","17","5","7")) # neuro new
+seurat_subset2 <- subset(seurat_subset, idents = c("9","11","8","19")) #RG
+seurat_subset3 <- subset(seurat_subset, idents = c("9","11")) #RG without VEGFA+ and OPC
+
+#cortical
+seurat_subset1 <- subset(seurat_subset, idents = c("1","6","0","12","13","2")) # neuro
+seurat_subset2 <- subset(seurat_subset, idents = c("8","11","3","16","9","15")) #RG
+
+p <- DimPlot(seurat_subset, cells.highlight = list(as.character(colnames(seurat_subset1)), as.character(colnames(seurat_subset2))), cols.highlight = c("#74C2BB","#FA8072")) + NoLegend()
+ggsave("cortical/DEA_selection.png", plot=p, device = "png", width = 7, height = 7)
+
+seurat_for_DEA <- function(so){
+  all.genes <- row.names(so)
+  so <- NormalizeData(so, normalization.method = "LogNormalize", scale.factor = 10000, assay = "RNA")
+  so <- ScaleData(so, features = all.genes, assay = "RNA")
+  so <- SCTransform(so, assay = "RNA", verbose = TRUE, return.only.var.genes = TRUE, n_genes = NULL, variable.features.n = NULL)
+  
+  so <- RunPCA(so, npcs = 50, verbose = FALSE, features = all.genes)
+  #ElbowPlot(so, ndims = 50, reduction = "pca")
+  
+  so <- RunUMAP(so, reduction = "pca", dims = 1:15, verbose = TRUE)
+  so <- FindNeighbors(so, reduction = "pca", dims = 1:15, verbose = TRUE)
+  so <- FindClusters(so, resolution = 0.2, verbose = TRUE)
+  
+  return(so)
+}
+
+saveRDS(seurat_subset3, "cortical/seurat_neuro_subset_forDEA.rds")
+saveRDS(seurat_subset3, "cortical/seurat_RG_subset_forDEA.rds")
+
+seurat.DEA <- seurat_for_DEA(seurat_subset1a)
+saveRDS(seurat.DEA, "230901_paper_figs/cerebral_neuro_DEA/seurat_neuro_forDEA.rds")
+```
+
+DEA
+```{r}
+source("DEA.R")
+```
+
+# Cortical integration
+```{r}
+seurat.object <- readRDS("cortical/seurat_subset_cortical.rds")
+
+seurat.list <- SplitObject(seurat.object, split.by = "Condition")
+seurat.list <- lapply(X = seurat.list, FUN = SCTransform)
+
+options(future.globals.maxSize = 100 * 1024^3)
+seurat_features <- SelectIntegrationFeatures(object.list = seurat.list, nfeatures = 2000, fvf.nfeatures = 2000)
+seurat_features <- seurat_features[substr(seurat_features,1,3) != "MT-"]
+seurat.list <- PrepSCTIntegration(object.list = seurat.list, anchor.features = seurat_features, 
+    verbose = TRUE)
+seurat_Anchor <- FindIntegrationAnchors(object.list = seurat.list, normalization.method = "SCT", 
+    anchor.features = seurat_features, verbose = TRUE, dims = 1:30, max.features = 500, n.trees = 50)
+seurat_integrated <- IntegrateData(anchorset = seurat_Anchor, normalization.method = "SCT", 
+    verbose = TRUE, dims = 1:30)
+
+rm(seurat.object,seurat_Anchor,seurat_features,seurat.list)
+
+all.genes <- row.names(seurat_integrated)
+seurat_integrated <- RunPCA(seurat_integrated, npcs = 50, verbose = FALSE, features = all.genes)
+ElbowPlot(seurat_integrated, ndims = 50, reduction = "pca")
+seurat_integrated <- RunUMAP(seurat_integrated, reduction = "pca", dims = 1:10, verbose = TRUE)
+seurat_integrated <- FindNeighbors(seurat_integrated, reduction = "pca", dims = 1:10, verbose = TRUE)
+seurat_integrated <- FindClusters(seurat_integrated, resolution = 0.3, verbose = TRUE)
+
+a <- DimPlot(seurat_integrated, label = T)
+b <- DimPlot(seurat_integrated, group.by = "Condition")
+a|b
+ggsave("cortical_integrated/UMAP_cortical.png", plot = a, device = "png", width = 7, height = 7)
+ggsave("cortical_integrated/UMAP_cortical_sample.png", plot = b, device = "png", width = 5, height = 4)
+
+seurat_integrated@active.assay <- "RNA"
+all.genes <- row.names(seurat_integrated)
+seurat_integrated <- NormalizeData(seurat_integrated, normalization.method = "LogNormalize", scale.factor = 10000, assay = "RNA")
+seurat_integrated <- ScaleData(seurat_integrated, features = all.genes, assay = "RNA")
+
+saveRDS(seurat_integrated,"cortical_integrated/seurat_cortical_integrated.rds")
+
+table(seurat_integrated$Condition)
+```
+
+```{r}
+markers <- FindAllMarkers(seurat_integrated, min.pct = 0.5, only.pos = TRUE, verbose = TRUE, assay = "RNA", min.diff.pct = 0.2)
+write.csv(markers, "cortical_integrated/markers_integrated.csv")
+
+markers.list <- unique(c("HES5","PAX6","SOX2",
+                         "MKI67","TNC","HOPX","MOXD1",
+                         "FABP7","AQP4","SOX9",
+                         "CRABP1",
+                         "ASCL1","GSX2","SMOC1",
+                         "ELAVL4","DCX","STMN2",
+                         "SYT4","GRIA2","GAP43",
+                         "GAD1","GRIA1","PCDHB7",
+                         "DCN","COL1A1","FN1","MKI67",
+                         "ACTC1","TNNT2","MYH8",
+                         "VEGFA","GADD45A","P4HA1"
+                         ))
+
+seurat_integrated <- RenameIdents(seurat_integrated,
+                                  "2" = "radial glia",
+                                  "8" = "proliferating radial glia",
+                                  "9" = "oRG/astrocytes",
+                                  "11" = "CRABP1+ cells",
+                                  "10" = "pre-OPCs",
+                                  "4" = "intermediate progenitors",
+                                  "0" = "neurons 1",
+                                  "1" = "neurons 2",
+                                  "3" = "mesenchymal-like cells",
+                                  "7" = "proliferating mesenchymal-like cells",
+                                  "5" = "muscle cells",
+                                  "6" = "stressed VEGFA+ cells")
+
+q.2 <- DotPlot(seurat_integrated,features = markers.list) +
+  theme(axis.text.x = element_text(angle = 40, vjust = 0.9, hjust = 0.9)) +
+  scale_color_gradient(high = "#8c0052",low = "#e0e0e0")
+ggsave("Supp_Fig6D_CTXmarkers.png", plot = q.2, device = "png", bg = "white", width = 14, height = 4)
+
+seurat_integrated$Condition <- factor(seurat_integrated$Condition, levels = c("Ctx_cr", "Ctx_AxD"))
+
+cluster_order <- match(levels(seurat_integrated), metaLevels("ident", seurat_integrated))
+bar.p <- dittoBarPlot(seurat_integrated, var = "ident" , group.by = "Condition", 
+                    data.out = T, var.labels.reorder = cluster_order, color.panel = as.character(palette),main = "") 
+bar.p[["data"]]$percent100 <- bar.p[["data"]]$percent * 100
+data.p <- bar.p[["data"]]
+```
+
+Fig. 6A
+```{r}
+palette <- c("#CC7A88", "#E6B8BF", "#B33E52", "#7ABECC", "#3E9FB3","#54990F", "#78B33E","#A3CC7A", "#653EB3", "#967ACC", "#C7B8E6", "#999999")
+# latest figure version
+p1 <- DimPlot(seurat_integrated, pt.size = 0.5, cols = as.character(palette),label = F,
+              cells = rownames(seurat_integrated@meta.data[seurat_integrated$Condition == "Ctx_cr",])) + 
+  NoLegend() +
+  xlim(-12,12) + ylim(-12,12) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  ggtitle("CTRL")
+p2 <- DimPlot(seurat_integrated, pt.size = 0.5,label = F, cols = as.character(palette),
+              cells = rownames(seurat_integrated@meta.data[seurat_integrated$Condition == "Ctx_AxD",])) + 
+  NoLegend() +
+  xlim(-12,12) + ylim(-12,12) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  ggtitle("AxD")
+
+ggsave(filename = "230901_paper_figs/cortical_UMAP.png", plot = grid.arrange(p1,p2,nrow = 2), device = "png",
+       height = 10, width = 6)
+
+data.p$label <- factor(data.p$label, levels = rev(levels(data.p$label)))
+# barplot to complement the legend
+p.p.bar2 <- ggplot(data = data.p, aes(x = count, y = label, fill = label)) + 
+  geom_bar(stat = "identity", width = 0.9, position = "dodge2") +
+  theme_void() +
+  scale_x_reverse(limits = c(1800,0), expand = c(0.05,0), breaks = c(500,1000,1500), position = "top") +
+  scale_y_discrete(position = "right") +
+  scale_fill_manual(values = rev(as.character(palette))) +
+  theme(axis.text.y = element_text(angle = 0, size = 11, hjust = 0, vjust = 0.3, 
+                                   margin = margin(l=3,unit="pt")),
+        axis.line.y = element_line(linewidth = 0.25, colour = "black"), 
+        axis.ticks.y = element_line(linewidth = 0.25, colour = "black"),
+        axis.line.x = element_line(linewidth = 0.25, colour = "black"),
+        axis.ticks.x = element_line(linewidth = 0.25, colour = "black"),
+        axis.ticks.length = unit(0.1, "cm"),
+        axis.text.x = element_text(angle = 0, size = 6, hjust = 0.5, vjust = 1.5, colour = "black"),
+        plot.margin = margin(r=0.7, b=0.5, t=0.5, l=0.5, unit="cm"),
+        legend.position = "none") 
+p.p.bar2 
+ggsave("230901_paper_figs/Fig6A_legendbar.png", p.p.bar2, device = "png", bg = "white", height = 5, width = 4)
+```
+
+Subset for DEA
+```{r}
+seurat.object <- readRDS("cortical_integrated/seurat_cortical_integrated.rds")
+seurat.object@active.ident <- seurat.object$integrated_snn_res.0.3
+seurat.subset <- subset(seurat.object, idents = c("0","1","2","4","8","9","10","11")) # all except mesench. and muscle cells and VEGFA+
+seurat.subset <- subset(seurat.object, idents = c("9")) #oRG
+
+p <- DimPlot(seurat.object, cells.highlight = list(as.character(colnames(seurat.subset))), cols.highlight = "#74C2BB") + NoLegend()
+ggsave("cortical_integrated/DEA_selection_oRG.png", plot=p, device = "png", width = 7, height = 7)
+
+all.genes <- row.names(seurat.subset)
+seurat.subset <- NormalizeData(seurat.subset, normalization.method = "LogNormalize", scale.factor = 10000, assay = "RNA")
+seurat.subset <- ScaleData(seurat.subset, features = all.genes, assay = "RNA")
+seurat.subset <- SCTransform(seurat.subset, assay = "RNA", verbose = TRUE, return.only.var.genes = TRUE, n_genes = NULL, variable.features.n = NULL)
+
+seurat.subset <- RunPCA(seurat.subset, npcs = 50, verbose = FALSE, features = all.genes)
+ElbowPlot(seurat.subset, ndims = 50, reduction = "pca")
+
+seurat.subset <- RunUMAP(seurat.subset, reduction = "pca", dims = 1:15, verbose = TRUE) # neural 15, oRG 10
+seurat.subset <- FindNeighbors(seurat.subset, reduction = "pca", dims = 1:15, verbose = TRUE)
+seurat.subset <- FindClusters(seurat.subset, resolution = 0.2, verbose = TRUE)
+
+saveRDS(seurat.subset, "cortical_integrated/seurat_neural_forDEA.rds")
+saveRDS(seurat.subset, "cortical_integrated/seurat_oRG_forDEA.rds")
+```
+
+DEA
+```{r}
+source("DEA.R")
+```
+
+Fig. 6B
+```{r}
+seurat_cortical_integrated <- readRDS("seurat_cortical_integrated.rds")
+
+# higlight markers
+seurat_cortical_integrated@active.assay <- "RNA"
+goi <- c("PAX6","GFAP","FOXG1","DCX","DCN","TNNT2","MKI67","VEGFA")
+p <- FeaturePlot(seurat_cortical_integrated, features = goi, cols = c("#e0e0e0","#8c0052"), pt.size = 0.7, order = T, min.cutoff = "q10", max.cutoff = "q90", ncol = 4) + theme(plot.title = element_text(size = 14, face = "bold", hjust =  0.5)) & NoAxes() + NoLegend()
+
+ggsave("cortical_goi.png", p, height = 6, width = 11)
+```
+
+Fig. 6C
+```{r}
+seurat_cortical_integrated@active.ident <- as.factor(seurat_cortical_integrated$Condition)
+seurat_cortical_integrated <- RenameIdents(seurat_cortical_integrated,
+                                           "Ctx_cr" = "CTRL",
+                                           "Ctx_AxD" = "AxD")
+seurat_cortical_integrated$Condition <- seurat_cortical_integrated@active.ident
+seurat_cortical_integrated@active.ident <- as.factor(seurat_cortical_integrated$clusters_annot)
+p <- VlnPlot(seurat_cortical_integrated, "FOXG1", split.by = "Condition",
+             idents = c("intermediate progenitors","neurons 1","neurons 2"), 
+             cols = c("#639DD1","#e06666")) +
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.5),
+        axis.title.x = element_blank(),
+        legend.position = c(0.85,0.9)) +
+  scale_x_discrete(labels = c("intermediate \nprogenitors", "neurons 1", "neurons 2"))
+p
+ggsave(plot = p, filename = "Fig_6C_cortical_FOXG1.png", device = "png",
+       width = 6, height = 4)
+```
+
+Fig. 6D
+```{r}
+# RG DEA
+DE_tests <- readRDS("cortical_integrated/DEA_oRG/Ctx_cr-Ctx_AxD.rds")
+res <- DE_tests[[1]]
+
+keyvals.colour <- ifelse(
+  (res$avg_log2FC < -0.65 | res$avg_log2FC > 0.65) & res$p_val_adj < 0.05, "#8c0052",
+         "#e0e0e0") 
+names(keyvals.colour)[keyvals.colour == "#8c0052"] <- 'significant'
+names(keyvals.colour)[keyvals.colour == "#e0e0e0"] <- 'insignificant'
+
+labs <- c("NFIB","SOX9","NNAT","NRXN1","AQP4","NCAN","FABP7","FAM171B","BCAN","FOXG1","MOXD1","C1orf61",
+          "SLIT1","EFNB3","RSPO3","CHL1","ID3","CRABP2","EPHA7","FN1","NPTX2","SPARCL1")
+
+p <- EnhancedVolcano(toptable = res,
+                     lab = rownames(res),
+                     selectLab = labs,
+                     x = 'avg_log2FC',
+                     y = 'p_val_adj',
+                     axisLabSize = 8,
+                     titleLabSize = 10,
+                     title = "CTRL - AxD",
+                     pCutoff = 0.05, 
+                     colAlpha = 0.7,
+                     colCustom = keyvals.colour,
+                     subtitleLabSize = 9,
+                     FCcutoff = 0.65, 
+                     labSize = 3,
+                     pointSize = 2.5,
+                     drawConnectors = T,
+                     maxoverlapsConnectors = Inf,
+                     min.segment.length = 0.1,
+                     arrowheads = FALSE,
+                     boxedLabels = F,
+                     cutoffLineType = "blank",
+                     caption = "|log2FC| > 0.65 and p-adj < 0.05"
+                     ) +
+  theme_light() +
+  theme(plot.subtitle = element_blank(), 
+        plot.caption = element_text(size = 10), 
+        plot.title = element_text(hjust = 0.5, size = 12),
+        panel.grid.minor = element_blank(), panel.grid.major = element_blank(),
+        axis.line = element_line(colour = "black", linewidth = 0.7, linetype = "solid"), 
+        axis.text = element_text(size = 12),
+        axis.title = element_text(size = 12),
+        axis.ticks = element_line(linewidth = 0.7, colour = "black"),
+        axis.ticks.length = unit(0.2, "cm"),
+        legend.position = "none") +
+  xlab(expression("Log"[2]*"FC")) +
+  guides(color = guide_legend(override.aes = list(size = 4)))
+p
+ggsave(plot = p, "Fig_6D_CTX_volcanoRG.png", device = "png", width = 4.5, height = 3.5)
+
+ego.results <- readRDS("cortical_integrated/DEA_oRG/ORA_results.rds")
+out <- merge_result(ego.results)
+out@compareClusterResult <- out@compareClusterResult[order(out@compareClusterResult$p.adjust),]
+out@compareClusterResult <- out@compareClusterResult[out@compareClusterResult$Count > 3,]
+p <- dotplot(out, showCategory = 5, by = "GeneRatio", includeAll = F, label_format = 100) +
+  theme_minimal() +
+  theme(axis.text = element_text(size = 16, colour = "black"),
+        axis.text.x = element_text(face = "bold"),
+        axis.title.x = element_blank(),
+        plot.title = element_text(size = 16, face = "bold", hjust = 8)) + 
+  ggtitle("GO Terms Enrichment") +
+  scale_color_gradient(low = "#8c0052",high = "#e0e0e0") 
+  
+p
+
+ggsave(plot = p, filename = "Fig_6D_CTX_ORA_oRG.png", device = "png", bg = "white",
+       width = 8, height = 4)
+```
+
+
+# Supplement
+Supp. Fig. 6A
+```{r}
+seurat_integrated <- readRDS("seurat_integrated.rds")
+seurat_integrated <- SetIdent(seurat_integrated, value = seurat_integrated$Sample)
+seurat_integrated <- RenameIdents(seurat_integrated, "CER_cr" = "UNG CTRL", 
+                                                     "CER_AxD" = "UNG AxD", 
+                                                     "Ctx_cr" = "CTX CTRL", 
+                                                     "Ctx_AxD" = "CTX AxD")
+vlnplotCustom <- function(features, intercept=NULL){
+  return(VlnPlot(seurat_integrated, features = features, pt.size = 0) +
+           geom_hline(yintercept = intercept) +
+           NoLegend() +
+           theme(axis.title.x = element_blank(),
+                   plot.title = element_text(size = 12)))
+}
+p1<-vlnplotCustom(features = "nCount_RNA") + theme(axis.text.x = element_blank())
+p2<-vlnplotCustom(features = "nFeature_RNA") + theme(axis.text.x = element_blank())
+p3<-vlnplotCustom(features = "percent.mt", intercept = 10)
+ggsave("Supp_Fig6A_VlnQC.png", plot = egg::ggarrange(p1,p2,p3, nrow = 3), device = "png", width = 5, height = 7)
+```
+
+Supp. Fig. 6B
+```{r}
+seurat_filtered_markers <- readRDS("seurat_filtered_markers.rds")
+seurat_filtered_markers <- SetIdent(seurat_filtered_markers, value = seurat_filtered_markers$Sample)
+seurat_filtered_markers <- RenameIdents(seurat_filtered_markers, "CER_cr" = "UNG CTRL", 
+                                                     "CER_AxD" = "UNG AxD", 
+                                                     "Ctx_cr" = "CTX CTRL", 
+                                                     "Ctx_AxD" = "CTX AxD")
+p4 <- DimPlot(seurat_filtered_markers, label = T, label.size = 4, group.by = "seurat_clusters", split.by = "ident") + theme(plot.title = element_blank()) + NoLegend()
+ggsave("Supp_Fig6B_UMAPall.png", plot = p4, device = "png", width = 10, height = 4) 
+```
+
+Supp. Fig. 7A,B: RT-qPCR
+```{r}
+source("RTqPCR_plots.R")
+```
+
+# Proteomics
+Correlation of RNAseq and proteomics data
+t-test proteomic data were used for the correlation - diff. expr. proteins (p<0.05)
+```{r}
+# load proteomics data - differentially expressed proteins
+setwd("..")
+# diff. expressed proteins, q val(FDR) < 0.05
+proteo <- read.csv("230619_proteomics/20230619_CVG_0516_MQ_proteome_complete_ttest_sign_gene_name_adjusted.txt", header = T, sep = "~")[,c(26,27,32)] #3459
+colnames(proteo) <- c("qval","log2FC","gene")
+
+# from those that are duplicated, choose the one with lower qvalue
+proteo <- proteo %>% group_by(gene) %>% filter(qval == min(qval)) # 3423/3459 
+
+# load seurat, prepare for DEA
+seurat <- readRDS("cortical_integrated/seurat_cortical_integrated.rds")
+seurat@active.assay <- "RNA"; seurat@active.ident <- as.factor(seurat$Condition)
+
+# generate list of specific DEGs comparing cortical control and AxD, the gene list are differentially expressed proteins detected by proteomics, only those that can be found in both seurat and proteomics data (3356)
+degs <- FindMarkers(seurat, ident.1 = "Ctx_AxD", ident.2 = "Ctx_cr", test.use = "t", assay = "RNA", 
+                    logfc.threshold = 0, features = proteo[proteo$gene %in% rownames(seurat),]$gene, min.pct = 0) 
+summary(degs)
+degs <- degs %>% filter(is.na(p_val_adj) == FALSE & p_val_adj < 0.05) # 2521 genes
+write.csv(degs, "230619_proteomics/DEGs_RNAseq.csv")
+
+degs <- read.csv("230619_proteomics/DEGs_RNAseq.csv", header = T, row.names = 1)
+# prepare data for the plot
+proteo <- proteo %>% filter(gene %in% rownames(degs)) %>% arrange(gene) 
+degs <- degs[order(rownames(degs)),]
+
+df <- data.frame(gene = rownames(degs),
+                 protein_diff = proteo$log2FC,
+                 gene_log2FC = degs$avg_log2FC) 
+
+gene.lab.myo <- df[grepl("^MYO",df$gene) | grepl("^MYH",df$gene) | grepl("^MYL",df$gene) | grepl("^MYT",df$gene),"gene"]
+gene.lab.neuro <- c("NRXN1","DLX1","FOXG1","GRIA1","DCX","NRXN3","STMN2","MAP2","GRIA2","NCAN","NEFM","NEFL")
+gene.others <- c("SOX2","GFAP","INA","NES","DES","LMNA","AQP4") #"LMNB1","LMNB2"
+gene.proteasome <- read.table("230619_proteomics/proteasome_protein_list.txt", header = T)[,1]
+
+# calculate correlation coefficient and statistics
+coef <- cor(df$protein_diff, df$gene_log2FC) #Pearson 0.6698879
+cor.stat <- cor.test(df$protein_diff, df$gene_log2FC, method = "pearson") #p-value < 2.2e-16
+#cor(df$protein_diff, df$gene_log2FC, method = "spearman") #Spearman 0.67525
+```
+
+Fig. 6E: correlation plot
+```{r}
+# plot and save the two variables against each other with a line, add correlation info as annotation
+p <- ggplot(df, aes(x=protein_diff, y=gene_log2FC, label=gene)) + 
+    geom_hline(yintercept = 0, color = "#999999") +
+    geom_vline(xintercept = 0, color = "#999999") +
+    geom_point(color = "#cfcfcf") + 
+    geom_point(data=subset(df, gene %in% gene.lab.myo), color = "#e06666", size = 3) +
+    geom_point(data=subset(df, gene %in% gene.lab.neuro), color = "#639DD1", size = 3) +
+    geom_point(data=subset(df, gene %in% gene.others), color = "#8FCE00", size = 3) +
+    #geom_point(data=subset(df, gene %in% gene.proteasome), color = "#FFA500", size = 3) +
+    geom_smooth(method = "lm", se = F, color = "black") +
+    geom_text_repel(data=subset(df, gene %in% c(gene.lab.myo, gene.lab.neuro, gene.others)), max.overlaps = Inf) + 
+  theme_bw() +
+  theme(axis.title = element_text(size = 16),
+        axis.text = element_text(size = 14, colour = "black"),
+        plot.margin = margin(r=0.5, b=0.5, l=0.5, t=0.5, unit = "cm")
+  ) +
+  xlab(expression("Protein log"[2]*"FC")) +
+  ylab(expression("Gene log"[2]*"FC")) +
+  annotate("text", x = -7, y = 5, size = 5, label = paste("r =", round(coef, digits = 3), "\n p-value < 2.2e-16"))
+p
+
+ggsave("230619_proteomics/Fig6E_correlation.png", plot = p, device = "png", width = 9, height = 6)
+```
+
+Intensities of selected proteins:
+normalized data with imputed missing values we used in the intensity plots.
+```{r}
+setwd("..")
+proteo <- read.delim("230619_proteomics/20231201_CVG_0516_D150_WholeProteome_Vulcano.txt", header = T, sep = "~")
+
+# remove duplicates, leave the most significant 
+proteo <- proteo %>% group_by(Gene.names) %>% filter(X.Log.P.value. == max(X.Log.P.value.)) # 6830/6926
+
+goi <- list(GFAP = "GFAP", AQP4 = "AQP4", `SOX-2` = "SOX2", 
+            `alpha-internexin` = "INA", `NEF-M` = "NEFM", `NEF-L` = "NEFL", FOXG1 = "FOXG1", nestin = "NES", desmin = "DES", `lamin-A/C` = "LMNA")
+
+boxplot_protein <- function(gene, title){
+  df <- proteo[proteo$Gene.names == gene,27:34] %>% t() %>% as.data.frame()
+  colnames(df) <- "log2_intensity"
+  df$log2_intensity <- as.numeric(df$log2_intensity)
+  df$condition <- gsub(pattern = "LFQ.intensity.", rownames(df), replacement = "")
+  df$condition <- gsub(pattern = "Ctrl", df$condition, replacement = "CTRL")
+  df$condition <- substr(df$condition, start = 1, stop = nchar(as.character(df$condition)) - 2) %>% as.factor()
+  
+  p <- ggplot(df, aes(x = factor(df$condition, levels = c("CTRL","AxD")), y = log2_intensity, 
+                  fill = factor(df$condition, levels = c("CTRL","AxD")))) + 
+    geom_boxplot(linewidth = 1) + 
+    geom_point(size = 3) +
+    ylab(expression("Log"[2]* " imputed intensity")) +
+    theme_light() +
+    theme(axis.title.x = element_blank(),
+          #axis.title.y = element_text(size = 14),
+          axis.title.y = element_blank(),
+          axis.text.x = element_text(size = 14, face = "bold", colour = "black"),
+          axis.text.y = element_text(size = 14, colour = "black"),
+          axis.line = element_line(linewidth = 1),
+          axis.ticks = element_line(linewidth = 1, colour = "black"),
+          legend.position = "none",
+          plot.title = element_text(hjust = 0.5, face = "bold", size = 16)
+        ) +
+    scale_fill_manual(values = c("#639DD1","#E06666")) +
+    ggtitle(title) +
+    scale_y_continuous(limits = c(NA, 1.03*max(df$log2_intensity))) +
+    stat_compare_means(method = "t.test", label = "p.signif", label.x = 1.5, size = 7, label.y = 1.005*max(df$log2_intensity), 
+                       hide.ns = F, comparisons = list(c("CTRL","AxD")))
+
+}
+
+plots <- lapply(seq_along(goi), function(x) boxplot_protein(goi[[x]], names(goi)[x]))
+```
+
+Fig. 6F: Protein boxplots
+```{r}
+gridExtra::grid.arrange(grobs = plots, nrow=2)
+ggsave("230619_proteomics/Fig6F_boxplot.png", plot = gridExtra::grid.arrange(grobs = plots, nrow=2), device = "png",
+       width = 10, height = 7)
+```
+
+Supplementary Fig. 7E
+```{r}
+# volcano plot
+proteo_volcano <- read.table("230619_proteomics/20231201_CVG_0516_D150_WholeProteome_Vulcano.txt", header = T, sep = "~")
+proteo_volcano <- proteo_volcano %>% group_by(Gene.names) %>% filter(X.Log.P.value. == max(X.Log.P.value.))
+proteo_volcano$pval <- 10^-(proteo_volcano$X.Log.P.value.)
+res <- proteo_volcano[,c("pval","Difference","Gene.names")]
+keyvals.colour <- ifelse(
+  res$Difference < -0.65 & res$pval < 0.05, '#5A7BC6',
+  ifelse(res$Difference > 0.65 & res$pval < 0.05, '#EB7321',
+         '#E7E7E7'))
+names(keyvals.colour)[keyvals.colour == '#5A7BC6'] <- 'downregulated'
+names(keyvals.colour)[keyvals.colour == '#EB7321'] <- 'upregulated'
+names(keyvals.colour)[keyvals.colour == '#E7E7E7'] <- 'insignificant'
+
+gene.lab.neuro
+gene.others
+gene.proteasome
+gene.lab.myo <- res[grepl("^MYO",res$Gene.names) | grepl("^MYH",res$Gene.names) | grepl("^MYL",res$Gene.names) | grepl("^MYT",res$Gene.names),]$Gene.names 
+  
+select.lab <-  res[abs(res$Difference) > 0.65 & res$pval < 0.05 & (res$Gene.names %in% c(gene.lab.neuro,gene.lab.myo,gene.others,gene.proteasome)),]$Gene.names 
+
+p <- EnhancedVolcano(toptable = res,
+                     lab = res$Gene.names,
+                     selectLab = select.lab,
+                     x = 'Difference',
+                     y = 'pval',
+                     axisLabSize = 8,
+                     titleLabSize = 10,
+                     title = "CTRL - AxD",
+                     pCutoff = 0.05, 
+                     colAlpha = 0.7,
+                     colCustom = keyvals.colour,
+                     subtitleLabSize = 9,
+                     FCcutoff = 0.65, 
+                     labSize = 3,
+                     pointSize = 2.5,
+                     drawConnectors = T,
+                     maxoverlapsConnectors = Inf,
+                     min.segment.length = 0.1,
+                     arrowheads = FALSE,
+                     boxedLabels = F,
+                     cutoffLineType = "blank",
+                     caption = "|log2FC| > 0.65 and p < 0.05") +
+  theme_light() +
+  theme(plot.subtitle = element_blank(), 
+        plot.caption = element_text(size = 10), 
+        plot.title = element_text(hjust = 0.5, size = 12),
+        panel.grid.minor = element_blank(), panel.grid.major = element_blank(),
+        axis.line = element_line(colour = "black", linewidth = 0.7, linetype = "solid"), 
+        axis.text = element_text(size = 12),
+        axis.title = element_text(size = 12),
+        axis.ticks = element_line(linewidth = 0.7, colour = "black"),
+        axis.ticks.length = unit(0.2, "cm"),
+        legend.position = "none") +
+  xlab(expression("Log"[2]*"FC")) +
+  guides(color = guide_legend(override.aes = list(size = 4))) +
+  scale_y_continuous(breaks = c(0,5,10), limits = c(0,10))
+p
+ggsave(plot = p, "230619_proteomics/Supp_Fig7E_volcano.png", device = "png", width = 10, height = 7)
+```
+
+Supplementary Fig. 7F: GO enrichment on proteins
+```{r}
+#### ORA
+background <- read.delim("230619_proteomics/20231201_CVG_0516_D150_WholeProteome_Vulcano.txt", header = T, sep = "~")[,"Gene.names"] %>% na.omit()
+
+proteo <- read.csv("230619_proteomics/20230619_CVG_0516_MQ_proteome_complete_ttest_sign_gene_name_adjusted.txt", header = T, sep = "~")[,c(26,27,32)] #3459
+colnames(proteo) <- c("qval","log2FC","gene")
+
+DEA.list <- list("UP" = proteo[proteo$log2FC > 0.65 & proteo$qval < 0.05,],
+                 "DOWN" = proteo[proteo$log2FC < -0.65 & proteo$qval < 0.05,])
+
+ego.results <- list()
+
+for (gene.list in 1:length(DEA.list)){    
+  ego <- enrichGO(gene          = DEA.list[[gene.list]]$gene,
+                  universe      = background,
+                  keyType       = "ALIAS",
+                  OrgDb         = org.Hs.eg.db,
+                  ont           = "BP",
+                  pAdjustMethod = "fdr",
+                  pvalueCutoff  = 0.1,
+                  qvalueCutoff  = 0.2,
+                  readable      = TRUE,
+                  minGSSize     = 5,
+                  maxGSSize     = 800)
+  ego <- simplify(ego)
+  ego.results[[names(DEA.list)[gene.list]]] <- ego
+}  
+saveRDS(ego.results, "230619_proteomics/ORA_results.rds")
+
+file.xlsx <- "230619_proteomics/ORA_results_sheet.xlsx"
+write.xlsx("empty", file.xlsx, sheetName = "0", append = FALSE)
+for (i in 1:length(ego.results)){
+  if (dim(ego.results[[i]])[1] != 0) {
+    write.xlsx(ego.results[[i]], file.xlsx, sheetName = names(ego.results)[i], append = TRUE)}
+}
+  
+out <- merge_result(ego.results)
+out@compareClusterResult <- out@compareClusterResult[order(out@compareClusterResult$p.adjust),]
+out@compareClusterResult <- out@compareClusterResult[out@compareClusterResult$Count > 5,]
+p <- dotplot(out, showCategory = 5, by = "GeneRatio", includeAll = T, label_format = 50) +
+  theme_minimal() +
+  theme(axis.text = element_text(size = 16, colour = "black"),
+        axis.text.x = element_text(face = "bold"),
+        axis.title.x = element_blank(),
+        plot.title = element_text(size = 16, face = "bold", hjust = 1)) + 
+  ggtitle("GO Terms Enrichment - Proteomics") +
+  scale_color_gradient(low = "#8c0052",high = "#e0e0e0") 
+p
+ggsave(plot = p, filename = "230619_proteomics/Supp_Fig7F_ORA_plot.png", device = "png", bg = "white",
+       width = 8, height = 5)
+```
+
+# Overlap with co-cultures
+Supplemetary figure 8A-E
+```{r}
+source("overlap_with_coculture.R")
+```
+# Differential abundance
+```{r}
+library("scProportionTest") #scProportionTest_0.0.0.9000
+proportion_test_func <- function(seurat.object, cluster_identity, sample_identity, plot_title){
+  so <- readRDS(seurat.object)
+  prop_test <- sc_utils(so)
+  prop_test <- permutation_test(
+	  prop_test, cluster_identity = cluster_identity,
+	  sample_1 = levels(as.factor(so$Sample))[2], sample_2 = levels(as.factor(so$Sample))[1],
+	  sample_identity = sample_identity, 
+  )
+  
+  plot <- permutation_plot(prop_test) + theme(axis.text = element_text(size = 10),
+                                              legend.position = "none") +
+    ggtitle(plot_title)
+  return(plot)
+}
+
+proportion_test_func(seurat.object = "cerebral/seurat_subset_cerebral.rds",
+                     cluster_identity = "clusters_annot", sample_identity = "Sample", plot_title = "Cerebral organoids")
+proportion_test_func(seurat.object = "cortical_integrated/seurat_cortical_integrated.rds",
+                     cluster_identity = "clusters_annot", sample_identity = "Sample", plot_title = "Cortical organoids")
+```

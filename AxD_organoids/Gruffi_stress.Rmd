@@ -1,0 +1,136 @@
+---
+title: "Gruffi stress"
+author: "Zuzana"
+date: "2023-08-24"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Based on: https://github.com/jn-goe/gruffi
+```{r}
+# Install CRAN & Bioconductor dependencies
+install.packages('BiocManager')
+BiocManager::install("DOSE")
+BiocManager::install("org.Hs.eg.db")
+BiocManager::install("sparseMatrixStats")
+BiocManager::install("biomaRt")
+
+
+# Install custom dependencies
+install.packages('devtools')
+devtools::install_github(repo = "vertesy/Stringendo", upgrade = F)
+devtools::install_github(repo = "vertesy/CodeAndRoll2", ref = 'v2.3.4', upgrade = F)
+devtools::install_github(repo = "vertesy/ReadWriter", upgrade = F)
+devtools::install_github(repo = "vertesy/MarkdownHelpers", upgrade = F)
+devtools::install_github(repo = "vertesy/Markdownreports", upgrade = F)
+devtools::install_github(repo = "vertesy/ggExpress", upgrade = F)
+devtools::install_github(repo = "vertesy/Seurat.utils", upgrade = F)
+
+
+# Install gruffi
+devtools::install_github(repo = "jn-goe/gruffi", upgrade = F)
+```
+
+Prepare seurat object - Gruffi can work with either integrated or RNA assay. If UMAP was made in SCT, it is not available. Basic analysis needs to be redone with only RNA assay, if integration is not desired (case with cerebral).
+```{r}
+combined.obj <- readRDS("cerebral/seurat_subset_cerebral.rds")
+combined.obj <- readRDS("cortical_integrated/seurat_cortical_integrated.rds")
+combined.obj.orig <- combined.obj
+# remove SCT and integrated assay
+DefaultAssay(combined.obj) <- "RNA"
+combined.obj[["integrated"]] <- NULL
+combined.obj[["SCT"]] <- NULL
+
+all.genes <- row.names(combined.obj)
+combined.obj <- NormalizeData(combined.obj, normalization.method = "LogNormalize", scale.factor = 10000, assay = "RNA")
+combined.obj <- FindVariableFeatures(combined.obj, selection.method = "vst", nfeatures = 2000)
+combined.obj <- ScaleData(combined.obj, features = all.genes, assay = "RNA")
+
+combined.obj <- RunPCA(combined.obj, npcs = 50, verbose = FALSE, features = VariableFeatures(combined.obj))
+
+combined.obj <- RunUMAP(combined.obj, reduction = "pca", dims = 1:20, verbose = TRUE)
+combined.obj <- FindNeighbors(combined.obj, reduction = "pca", dims = 1:20, verbose = TRUE)
+combined.obj <- FindClusters(combined.obj, resolution = 0.5, verbose = TRUE)
+
+umap <- DimPlot(combined.obj, label = T)
+```
+
+```{r}
+library(gruffi)
+
+combined.obj <- Seurat.utils::SetupReductionsNtoKdimensions(obj = combined.obj, nPCs = 50, dimensions=3:2, reduction="umap")
+# Note that this will recalculate 2D and 3D umaps, and back them up in combined.obj@misc$reductions.backup. 
+# See FAQ.md, if you don't want to overwrite the 2D UMAP.
+combined.obj <- RecallReduction(obj = combined.obj, dim = 2, reduction="umap") # access other stored UMAPs
+```
+
+```{r}
+ensembl <- biomaRt::useEnsembl("ensembl", dataset = "hsapiens_gene_ensembl")
+
+go1 <- "GO:0006096" # Glycolysis
+go2 <- "GO:0034976" # ER-stress
+go3 <- "GO:0042063" # Gliogenesis, negative filtering
+go4 <- "GO:0022008" # Neurogenesis
+```
+
+```{r}
+combined.obj <- aut.res.clustering(obj = combined.obj)
+granule.res.4.gruffi <- combined.obj@misc$gruffi$'optimal.granule.res'	
+combined.obj <- reassign.small.clusters(combined.obj, ident = granule.res.4.gruffi) # will be stored in meta data column as "seurat_clusters.reassigned"
+granule.res.4.gruffi <- paste0(granule.res.4.gruffi, '.reassigned')
+```
+
+```{r}
+# Glycolytic process	GO:0006096
+combined.obj <- GO_score_evaluation(obj = combined.obj, GO_term = go1, save.UMAP = TRUE, new_GO_term_computation = T, clustering = granule.res.4.gruffi, plot.each.gene = F)
+
+# ER stress 	GO:0034976
+combined.obj <- GO_score_evaluation(obj = combined.obj, GO_term = go2, save.UMAP = TRUE, new_GO_term_computation = T, clustering = granule.res.4.gruffi, plot.each.gene = F)
+
+# # Gliogenesis		GO:0042063
+# combined.obj <- GO_score_evaluation(obj = combined.obj, GO_term = go3, save.UMAP = TRUE, new_GO_term_computation = T, clustering = granule.res.4.gruffi, plot.each.gene = F)
+
+# Neurogenesis		GO:0022008
+combined.obj <- GO_score_evaluation(obj = combined.obj, GO_term = go4, save.UMAP = TRUE, new_GO_term_computation = T, clustering = granule.res.4.gruffi, plot.each.gene = F)
+```
+
+```{r}
+# Create score names:
+(i1 <- Stringendo::kppu(granule.res.4.gruffi, 'cl.av', go1))
+(i2 <- Stringendo::kppu(granule.res.4.gruffi, 'cl.av', go2))
+(i3 <- Stringendo::kppu(granule.res.4.gruffi, 'cl.av', go3))
+(i4 <- Stringendo::kppu(granule.res.4.gruffi, 'cl.av', go4))
+
+# Call Shiny app
+combined.obj <- Shiny.GO.thresh(obj = combined.obj,
+                                stress.ident1 = i1,
+                                stress.ident2 = i2,
+                                notstress.ident3 = i4,
+                                plot.cluster.shiny = "orig.ident")
+
+#"Dont forget to click the button in the app: Save New Thresholds"
+
+Seurat.utils::clUMAP('is.Stressed', label =F)
+
+combined.obj.orig
+combined.obj.orig$is.Stressed <- combined.obj$is.Stressed
+```
+
+Supplementary Fig. 6F, H (cerebral/cortical)
+```{r}
+p <- DimPlot(combined.obj.orig, group.by = "is.Stressed")
+ggsave(filename = "stressed_Gruffi.png", plot = p, device = "png", width = 6, height = 5)
+```
+
+Remove stressed cells if needed
+```{r}
+cellIDs.keep <- which_names(!combined.obj$'is.Stressed')
+subset.obj <- subset(x = combined.obj, cells = cellIDs.keep)  
+
+Seurat.utils::clUMAP('is.Stressed', label = F, obj = subset.obj)
+```

@@ -1,0 +1,795 @@
+---
+title: "scRNA-Seq"
+author: "Pavel"
+date: "22 12 2021"
+output: html_document
+---
+
+Load required package
+```{r, message=FALSE, warning=FALSE, paged.print=TRUE}
+suppressMessages(library("scater"))
+suppressMessages(library("Matrix"))
+suppressMessages(library("NormExpression"))
+suppressMessages(library("DropletUtils"))
+suppressMessages(library("DESeq2"))
+suppressMessages(library("pheatmap"))
+suppressMessages(library("RColorBrewer"))
+suppressMessages(library("ggplot2"))
+suppressMessages(library("Seurat"))
+suppressMessages(library("sctransform"))
+suppressMessages(library("DT"))
+suppressMessages(library("scales"))
+suppressMessages(library("ggrepel"))
+suppressMessages(library("dplyr"))
+suppressMessages(library("SeuratWrappers"))
+suppressMessages(library("scmap"))
+suppressMessages(library("DoubletFinder"))
+suppressMessages(library("scCATCH"))
+suppressMessages(library("reshape2"))
+suppressMessages(library("Nebulosa"))
+```
+
+```{r}
+samples<-read.table("../samples.csv",header=TRUE,sep=",")
+```
+
+```{r load_data, eval=FALSE, message = FALSE}
+STAR<-as.list(NULL)
+for(i in 1:nrow(samples)) {
+  folder <- paste0("../STAR/",samples$SampleName[i],"/",samples$SampleName[i],"Solo.out/Gene/raw/")
+  dims <- readr::read_delim(paste0(folder, "matrix.mtx"), delim = ' ', skip = 2, n_max = 1, col_names = FALSE)
+  t <- readr::read_delim(paste0(folder, "matrix.mtx"), delim = ' ', skip = 3, col_names = FALSE)
+  
+  cellbarcodes <- read.table(paste0(folder, "barcodes.tsv"))
+  genenames <- read.table(paste0(folder, "genes.tsv"))
+  dimnames <- as.list(NULL)
+  dimnames[[1]] <- as.character(genenames$V2)
+  dimnames[[2]] <- as.character(paste0(cellbarcodes$V1,"-",samples$SampleName[i]))
+  
+  STAR[[i]]<-as.list(NULL)
+  STAR[[i]][["RNA"]] <- Matrix::sparseMatrix(i = t$X1, j = t$X2, x = t$X3, dims = c(dims$X1, dims$X2), dimnames = dimnames)
+}
+```
+
+
+```{r, eval = FALSE}
+rm(cellbarcodes, dimnames, dims, genenames, t, i, folder)
+saveRDS(STAR,"STAR_raw.rds")
+```
+
+```{r, include = FALSE}
+STAR <- readRDS("STAR_raw.rds")
+```
+
+
+```{r eval=FALSE}
+p <- as.list(NULL)
+p_2 <- as.list(NULL)
+for(i in 1:nrow(samples)) {
+  bcrank = barcodeRanks(STAR[[i]]$RNA, lower = 1000)
+  uniq = !duplicated(bcrank$rank)
+
+  knee_count <- paste0("Knee = ",table(bcrank$total >= metadata(bcrank)$knee)[2]," cells")
+  inflection_count <- paste0("Inflection = ",table(bcrank$total >= metadata(bcrank)$inflection)[2]," cells")
+  
+  p[[i]] <- qplot(bcrank$rank[uniq], bcrank$total[uniq], geom = "line") +
+    geom_hline(yintercept = metadata(bcrank)$knee, color = "blue", linetype = 2) +
+    geom_hline(yintercept = metadata(bcrank)$inflection, color = "darkgreen", linetype = 2) +
+    annotate("text", x = 10000, y = 1.5 * c(metadata(bcrank)$knee, metadata(bcrank)$inflection),
+           label = c(knee_count, inflection_count), color = c("blue", "darkgreen")) +
+    scale_x_log10() +
+    scale_y_log10() +
+    labs(x = "Barcode rank", y = "Total UMI count", title = samples$SampleName[i])
+  print(p[[i]])
+
+  e.out = emptyDrops(STAR[[i]]$RNA, lower = 2000, test.ambient = FALSE)
+  is.cell = (e.out$FDR <= 0.01)
+  w2kp = which(is.cell)
+
+  STAR[[i]]$RNA = STAR[[i]]$RNA[,w2kp]
+  
+  bcrank = barcodeRanks(STAR[[i]]$RNA, lower = 500)
+  
+  knee_count <- paste0("Knee = ",table(bcrank$total >= metadata(bcrank)$knee)[2]," cells")
+  inflection_count <- paste0("Inflection = ",table(bcrank$total >= metadata(bcrank)$inflection)[2]," cells")
+  
+  p_2[[i]] <- qplot(bcrank$rank[uniq], bcrank$total[uniq], geom = "line") +
+    geom_hline(yintercept = metadata(bcrank)$knee, color = "blue", linetype = 2) +
+    geom_hline(yintercept = metadata(bcrank)$inflection, color = "darkgreen", linetype = 2) +
+    annotate("text", x = 10, y = 1.5 * c(metadata(bcrank)$knee, metadata(bcrank)$inflection),
+           label = c(knee_count, inflection_count), color = c("blue", "darkgreen")) +
+    scale_x_log10() +
+    scale_y_log10() +
+    labs(x = "Barcode rank", y = "Total UMI count", title = paste0(samples$SampleName[i]," ",ncol(STAR[[i]]$RNA)," cells"))
+  print(p_2[[i]])
+}
+```
+
+
+```{r Pictures_EmptyDrop, echo=FALSE, fig.height=3, fig.width=4}
+p <- as.list(NULL)
+for(i in 1:nrow(samples)) {
+  bcrank = barcodeRanks(STAR[[i]]$RNA, lower = 2000)
+  uniq = !duplicated(bcrank$rank)
+  
+  knee_count <- paste0("Knee = ",table(bcrank$total >= metadata(bcrank)$knee)[2]," cells")
+  inflection_count <- paste0("Inflection = ",table(bcrank$total >= metadata(bcrank)$inflection)[2]," cells")
+  
+  p[[i]] <- qplot(bcrank$rank[uniq], bcrank$total[uniq], geom = "line") +
+    geom_hline(yintercept = metadata(bcrank)$knee, color = "blue", linetype = 2) +
+    geom_hline(yintercept = metadata(bcrank)$inflection, color = "darkgreen", linetype = 2) +
+    annotate("text", x = 10000, y = 1.5 * c(metadata(bcrank)$knee, metadata(bcrank)$inflection),
+           label = c(knee_count, inflection_count), color = c("blue", "darkgreen")) +
+    scale_x_log10() +
+    scale_y_log10() +
+    labs(x = "Barcode rank", y = "Total UMI count", title = paste0(samples$SampleName[i]))
+  print(p[[i]])
+}
+```
+
+```{r, eval = FALSE}
+rm(bcrank, e.out, i, inflection_count, is.cell, knee_count, uniq, w2kp)
+saveRDS(STAR,"STAR_emptyDrops.rds")
+```
+
+```{r}
+STAR <- readRDS("STAR_emptyDrops.rds")
+```
+
+
+```{r Pictures_EmptyDrop_filtered, echo=FALSE, fig.height=3, fig.width=4}
+p_2 <- as.list(NULL)
+for(i in 1:nrow(samples)) {
+  bcrank = barcodeRanks(STAR[[i]]$RNA, lower = 2000)
+  uniq = !duplicated(bcrank$rank)
+  
+  knee_count <- paste0("Knee = ",table(bcrank$total >= metadata(bcrank)$knee)[2]," cells")
+  inflection_count <- paste0("Inflection = ",table(bcrank$total >= metadata(bcrank)$inflection)[2]," cells")
+  
+  p_2[[i]] <- qplot(bcrank$rank[uniq], bcrank$total[uniq], geom = "line") +
+    geom_hline(yintercept = metadata(bcrank)$knee, color = "blue", linetype = 2) +
+    geom_hline(yintercept = metadata(bcrank)$inflection, color = "darkgreen", linetype = 2) +
+    annotate("text", x = 10, y = 1.5 * c(metadata(bcrank)$knee, metadata(bcrank)$inflection),
+           label = c(knee_count, inflection_count), color = c("blue", "darkgreen")) +
+    scale_x_log10() +
+    scale_y_log10() +
+    labs(x = "Barcode rank", y = "Total UMI count", title = paste0(samples$SampleName[i]," ",ncol(STAR[[i]]$RNA)," cells"))
+  print(p_2[[i]])
+}
+```
+
+
+
+```{r conversion, eval=FALSE, message=FALSE, warning=FALSE}
+seurat<-as.list(NULL)
+for(i in 1:nrow(samples)) {
+  seurat[[as.vector(samples$SampleName[i])]] <- as.Seurat(x = STAR[[i]])
+  seurat[[i]]$Sample <- samples$SampleName[i]
+  seurat[[i]]$Condition <- samples$Condition[i]
+  seurat[[i]]$Genotype <- samples$Genotype[i]
+  seurat[[i]]$Genotype_Neuro <- samples$Genotype_Neuro[i]
+  seurat[[i]]$Genotype_Astro <- samples$Genotype_Astro[i]
+}
+```
+
+
+```{r eval=FALSE}
+rm(STAR, p, p_2, i)
+saveRDS(seurat,"seurat_emptyDrops.rds")
+```
+
+```{r eval=TRUE, include = FALSE}
+seurat <- readRDS("seurat_emptyDrops.rds")
+```
+
+
+```{r, echo=FALSE,fig.height=4, fig.width=8}
+p <- NULL
+for(i in 1:nrow(samples)) {
+  seurat[[i]][["percent.mt"]] <- PercentageFeatureSet(seurat[[i]], pattern = "MT-")
+  seurat[[i]][["percent.rib"]] <- PercentageFeatureSet(seurat[[i]], pattern = "RPL|RPS")
+  print(names(seurat)[i])
+  gridExtra::grid.arrange(FeatureScatter(seurat[[i]],feature1 = "nCount_RNA", feature2 = "percent.mt") + geom_vline(xintercept=3500) + NoLegend(),
+            FeatureScatter(seurat[[i]],feature1 = "nFeature_RNA", feature2 = "percent.mt") + geom_vline(xintercept=2000) + NoLegend())
+  gridExtra::grid.arrange(VlnPlot(seurat[[i]], features = c("nCount_RNA"), pt.size = 0) + geom_hline(yintercept = 3500) + scale_y_log10() + NoLegend(),
+            VlnPlot(seurat[[i]], features = c("nFeature_RNA"), pt.size = 0) + geom_hline(yintercept = 2000) + scale_y_log10() + NoLegend(),
+            VlnPlot(seurat[[i]], features = c("percent.mt"), pt.size = 0) + geom_hline(yintercept = 10) + NoLegend(),
+            ncol = 3)
+}
+```
+
+```{r}
+seurat_filtered <- NULL
+p2 <- NULL
+for(i in 1:nrow(samples)) {
+  seurat_filtered[[i]] <- subset(seurat[[i]], subset = nFeature_RNA > 1500 & nCount_RNA > 2500)
+  gridExtra::grid.arrange(VlnPlot(seurat_filtered[[i]], features = c("nCount_RNA"), pt.size = 0.1) + geom_hline(yintercept = 2500),
+                       VlnPlot(seurat_filtered[[i]], features = c("nFeature_RNA"), pt.size = 0.1) + geom_hline(yintercept = 1500),
+                       VlnPlot(seurat_filtered[[i]], features = c("percent.mt"), pt.size = 0.1) + geom_hline(yintercept = 10),
+                       VlnPlot(seurat_filtered[[i]], features = c("percent.rib"), pt.size = 0.1),
+                       ncol = 4)
+}
+```
+
+
+```{r eval=FALSE}
+rm(i,p)
+saveRDS(seurat,"seurat_QC.rds")
+```
+
+```{r eval = FALSE, include = FALSE}
+seurat <- readRDS("seurat_QC.rds")
+```
+
+```{r Transfromation, eval=FALSE, message=FALSE, warning=FALSE}
+all.genes <- rownames(seurat[[1]])
+seurat_transformed <- as.list(NULL)
+for(i in 1:nrow(samples)) {
+  seurat_transformed[[i]] <- NormalizeData(seurat[[i]], normalization.method = "LogNormalize", scale.factor = 10000, assay = "RNA")
+  seurat_transformed[[i]] <- ScaleData(seurat_transformed[[i]], features = all.genes, assay = "RNA")
+  seurat_transformed[[i]] <- SCTransform(seurat_transformed[[i]],verbose = TRUE, return.only.var.genes = TRUE,assay = "RNA", n_genes = NULL, variable.features.n = NULL)
+}
+```
+
+
+
+```{r eval=FALSE}
+rm(i,p,all.genes)
+saveRDS(seurat_transformed,"seurat_SCTransfrom.rds")
+```
+
+```{r eval = FALSE, include = FALSE}
+seurat_transformed <- readRDS("seurat_SCTransfrom.rds")
+```
+
+
+```{r Integration, eval=FALSE, message=FALSE, warning=FALSE}
+gc()
+all.genes <- rownames(seurat[[1]])
+options(future.globals.maxSize = 100 * 1024^3)
+seurat_features <- SelectIntegrationFeatures(object.list = seurat_transformed, nfeatures = 20000, fvf.nfeatures = 20000)
+seurat_features <- seurat_features[substr(seurat_features,1,3) != "MT-" &
+                                                      substr(seurat_features,1,3) != "RPL" &
+                                                      substr(seurat_features,1,3) != "RPS"]
+seurat_integrated <- PrepSCTIntegration(object.list = seurat_transformed, anchor.features = seurat_features, 
+    verbose = TRUE)
+seurat_Anchor <- FindIntegrationAnchors(object.list = seurat_integrated, normalization.method = "SCT", 
+    anchor.features = seurat_features, verbose = TRUE, dims = 1:30, max.features = 500, n.trees = 50)
+seurat_integrated <- IntegrateData(anchorset = seurat_Anchor, normalization.method = "SCT", 
+    verbose = TRUE, dims = 1:30)
+```
+
+```{r eval=FALSE}
+gc()
+#saveRDS(seurat_Anchor,"seurat_Anchor.rds")
+rm(seurat,seurat_Anchor,seurat_features,seurat_transformed,all.genes)
+saveRDS(seurat_integrated,"seurat_integrated.rds")
+```
+
+
+```{r, eval = FALSE}
+seurat_integrated <- readRDS("seurat_integrated.rds")
+```
+
+
+
+```{r UMAP, eval = FALSE}
+all.genes <- row.names(seurat_integrated)
+seurat_integrated <- RunPCA(seurat_integrated, npcs = 50, verbose = FALSE, features = all.genes)
+seurat_integrated <- RunUMAP(seurat_integrated, reduction = "pca", dims = 1:30, verbose = TRUE)
+seurat_integrated <- FindNeighbors(seurat_integrated, reduction = "pca", dims = 1:30, verbose = TRUE)
+seurat_integrated <- FindClusters(seurat_integrated, resolution = 0.5, verbose = TRUE)
+```
+
+```{r eval=FALSE}
+saveRDS(seurat_integrated,"seurat_integrated_UMAP.rds")
+```
+
+```{r eval = TRUE, include = FALSE}
+seurat_integrated <- readRDS("seurat_integrated_UMAP.rds")
+```
+
+
+```{r pictures_plot, messages = FALSE, fig.width = 6, fig.height = 6}
+DimPlot(seurat_integrated, reduction = "umap", label = TRUE)
+FeaturePlot(seurat_integrated, features = c("percent.rib","percent.mt"), min.cutoff = "q10", max.cutoff = "q90", ncol = 1, cols = c("gray","red"))
+FeaturePlot(seurat_integrated, features = c("nFeature_RNA","nCount_RNA"), min.cutoff = "q10", max.cutoff = "q90", ncol = 1, cols = c("gray","red"))
+```
+
+```{r}
+#VlnPlot(seurat_integrated, features = c("nFeature_RNA","nCount_RNA","percent.mt","percent.rib"), ncol = 1)
+VlnPlot(seurat_integrated, features = "nFeature_RNA", ncol = 1, pt.size = 0) + geom_hline(yintercept=1500) + geom_hline(yintercept=2000, color = "red") + NoLegend()
+VlnPlot(seurat_integrated, features = "nCount_RNA", ncol = 1, pt.size = 0) + geom_hline(yintercept=2500) + ylim(2000,15000) + geom_hline(yintercept=3500, color = "red") + NoLegend()
+VlnPlot(seurat_integrated, features = "percent.mt", ncol = 1, pt.size = 0) + geom_hline(yintercept=10) + NoLegend()
+VlnPlot(seurat_integrated, features = "percent.rib", ncol = 1, pt.size = 0) + NoLegend()
+VlnPlot(seurat_integrated, features = "MALAT1", ncol = 1, pt.size = 0) + geom_hline(yintercept=0) + NoLegend()
+```
+
+
+```{r, messages = FALSE, fig.width = 16}
+DimPlot(seurat_integrated, reduction = "umap", label = TRUE, split.by = "Sample")
+DimPlot(seurat_integrated, reduction = "umap", label = FALSE, group.by = "Sample", pt.size = 1)
+```
+
+```{r}
+features_test <- c("SOX9","NFIB",      # ASTRO transformation
+                   "CD44","GJA1","S100B", #General ASTRO
+                   "GFAP","VIM",                      # Reactive ASTRO
+                   "EPCAM","CDH1","CLDN7",  #Maturated iPSC from fibroblats
+                   "SLC17A6","ISL1",
+                   "MAP2","SYP","DCX","STMN1","TH", #Neuronal
+                   "CCND2","SOX4",   
+                   "MGP",
+                   "VCAN",
+                   "FABP7"
+                 )
+```
+
+
+```{r, fig.height=15, fig.width = 30}
+FeaturePlot(seurat_integrated, features = features_test, min.cutoff = "q10", max.cutoff = "q90", ncol = 6, cols = c("gray","red"))
+DotPlot(seurat_integrated, features = features_test) + theme(axis.text.x=element_text(angle=90, hjust = 1, vjust = 0.5))
+#FeaturePlot(seurat_integrated, features = "GFAP", min.cutoff = "q10", max.cutoff = "q90", cols = c("gray","red"))
+```
+
+
+
+```{r Markers_Identification, eval = FALSE}
+markers <- FindAllMarkers(seurat_integrated, min.pct = 0.8, only.pos = TRUE, verbose = TRUE, assay = "integrated")
+```
+
+```{r, eval = FALSE}
+saveRDS(markers,"markers.rds")
+write.csv(markers,"markers.csv")
+```
+
+```{r, eval = TRUE, include = FALSE}
+markers <- readRDS("markers.rds")
+```
+
+```{r}
+datatable(markers %>% group_by(cluster) %>% top_n(n = 15, wt = avg_log2FC))
+```
+
+
+
+
+#DoubletFinder
+
+
+```{r, eval = FALSE}
+seurat_SCT <- NULL
+#Pre-process
+for(i in 1:nrow(samples)) {
+  seurat_SCT[[i]] <- seurat_integrated[,seurat_integrated$Sample == names(table(seurat_integrated$Sample))[i]]
+  seurat_SCT[[i]] <- RunPCA(seurat_SCT[[i]], npcs = 20, verbose = FALSE)
+  seurat_SCT[[i]] <- RunUMAP(seurat_SCT[[i]], dims = 1:20, verbose = FALSE)
+  Idents(seurat_SCT[[i]]) <- as.matrix(Idents(seurat_integrated))[row.names(as.matrix(Idents(seurat_SCT[[i]]))),]
+}
+```
+
+```{r eval=FALSE}
+saveRDS(seurat_SCT,"seurat_SCT_UMAP.rds")
+```
+
+```{r read_SCT_after_UMAP, eval = TRUE, include = FALSE}
+seurat_SCT <- readRDS("seurat_SCT_UMAP.rds")
+```
+
+
+```{r eval = FALSE, message=FALSE, warning=FALSE, include=TRUE}
+#pK Identification (no ground-truth)
+sweep.res.list <- as.list(NULL)
+sweep.stats <- as.list(NULL)
+bcmvn <- as.list(NULL)
+bcmvn_pK_value <- as.vector(NULL)
+p_bcmvn <- as.list(NULL)
+
+for(i in 1:length(table(seurat_integrated$Sample))) {
+  DefaultAssay(seurat_SCT[[1]]) <- "SCT"
+  suppressWarnings(sweep.res.list[[i]] <- paramSweep_v3(seurat_SCT[[i]], PCs = 1:20, sct = TRUE, num.cores = 1))
+  sweep.stats[[i]] <- summarizeSweep(sweep.res.list[[i]], GT = FALSE)
+  bcmvn[[i]] <- find.pK(sweep.stats[[i]])
+  
+  bcmvn_BC_value <- max(bcmvn[[i]]$BCmetric)
+  bcmvn_pK_value[i] <- as.numeric(as.vector(bcmvn[[i]][bcmvn[[i]]$BCmetric == bcmvn_BC_value,]$pK))
+}
+```
+
+```{r eval = FALSE}
+saveRDS(sweep.res.list,"sweep.res.list1.rds")
+saveRDS(sweep.stats,"sweep.stats1.rds")
+saveRDS(bcmvn_pK_value,"bcmvn_pK_value1.rds")
+saveRDS(bcmvn,"bcmvn1.rds")
+saveRDS(p_bcmvn,"p_bcmvn1.rds")
+```
+
+```{r read_pK_analysis, eval = TRUE, include = FALSE}
+bcmvn_pK_value <- readRDS("bcmvn_pK_value1.rds")
+bcmvn <- readRDS("bcmvn1.rds")
+```
+
+
+```{r print_pK_test, include = TRUE, eval = TRUE}
+for(i in 1:length(table(seurat_integrated$Sample))) {
+  p <- qplot(as.numeric(as.vector(bcmvn[[i]]$pK)), bcmvn[[i]]$BCmetric, geom = "line") +
+    geom_vline(xintercept = bcmvn_pK_value[i], color = "red", linetype = 2) +
+    annotate("text",
+             x = if (bcmvn_pK_value[i] < 0.2) {
+               bcmvn_pK_value[i] + 0.05
+               } else {
+               bcmvn_pK_value[i] - 0.05
+               },
+             y = 100,
+             label = paste0("Optimal pK = ",bcmvn_pK_value[i]),
+             color = "red") +
+    labs(x = "pK", y = expression(BC[mvn]), title = names(table(seurat_integrated$Sample))[i])
+  print(p)
+}
+```
+
+
+
+```{r, eval = FALSE}
+#Homotypic Doublet Proportion Estimate
+annotations <- as.list(NULL)
+homotypic.prop <- as.vector(NULL)
+nExp_poi <- as.vector(NULL)
+nExp_poi.adj <- as.vector(NULL)
+
+for(i in 1:length(table(seurat_integrated$Sample))) {
+  annotations[[i]] <- as.character(Idents(seurat_SCT[[i]]))
+  homotypic.prop[i] <- modelHomotypic(annotations[[i]])
+  nExp_poi[i] <- round(0.05*length(row.names(seurat_SCT[[i]]@meta.data)))  ## Assuming 5% doublet formation rate - estimated by 10x
+  nExp_poi.adj[i] <- round(nExp_poi[i]*(1-homotypic.prop[i]))
+}
+```
+
+```{r, eval = FALSE}
+rm(annotations,homotypic.prop)
+saveRDS(nExp_poi,"nExp_poi1.rds")
+saveRDS(nExp_poi.adj,"nExp_poi_adj1.rds")
+```
+
+```{r read_nExp, eval = TRUE, include = FALSE}
+nExp_poi <- readRDS("nExp_poi1.rds")
+nExp_poi.adj <- readRDS("nExp_poi_adj1.rds")
+```
+
+```{r eval=FALSE, message=FALSE, warning=FALSE}
+for(i in 1:length(table(seurat_integrated$Sample))) {
+  suppressWarnings(seurat_SCT[[i]] <- doubletFinder_v3(seurat_SCT[[i]], PCs = 1:10, pN = 0.25, pK = bcmvn_pK_value[i], nExp = nExp_poi[i],
+                                      reuse.pANN = FALSE, sct = TRUE))
+  suppressWarnings(seurat_SCT[[i]] <- doubletFinder_v3(seurat_SCT[[i]], PCs = 1:10, pN = 0.25, pK = bcmvn_pK_value[i], nExp = nExp_poi.adj[i],
+                                      reuse.pANN = paste0("pANN_0.25_",bcmvn_pK_value[i],"_",nExp_poi[i]), sct = TRUE))
+}
+```
+
+
+```{r eval=FALSE}
+saveRDS(seurat_SCT,"seurat_SCT_doubletFinder.rds")
+```
+
+```{r read_tables_with_doublets, eval=TRUE, include = FALSE}
+seurat_SCT <- readRDS("seurat_SCT_doubletFinder.rds")
+```
+
+```{r, eval = FALSE}
+seurat_dublets_all <- data.frame(NULL)
+
+for(i in 1:length(table(seurat_integrated$Sample))) {
+  seurat_dublets <- seurat_SCT[[i]]@meta.data[,colnames(seurat_SCT[[i]]@meta.data) == paste0("DF.classifications_0.25_",bcmvn_pK_value[i],"_",nExp_poi[i]) |
+    colnames(seurat_SCT[[i]]@meta.data) == paste0("DF.classifications_0.25_",bcmvn_pK_value[i],"_",nExp_poi.adj[i])]
+  colnames(seurat_dublets) <- c("Low Confidence","High Confidence")
+  seurat_dublets_all <- rbind(seurat_dublets_all,seurat_dublets)
+}
+
+seurat_integrated$Doublet <- c(apply(seurat_dublets_all,1,
+                                     function(x){
+                                       if(x[1]==x[2])
+                                         if(x[1]=="Singlet")
+                                           "Singlet"
+                                         else "Doublet - High Confidence"
+                                       else "Doublet - Low Confidence"}))
+```
+
+
+```{r eval=FALSE}
+gc()
+rm(bcmvn,bcmvn_BC_value,bcmvn_pK_value,i,nExp_poi,nExp_poi.adj,p,p_bcmvn,seurat_dublets,seurat_dublets_all,seurat_SCT,sweep.res.list,sweep.stats)
+saveRDS(seurat_integrated,"seurat_integrated_doubletFinder.rds")
+```
+
+```{r read_all_cells_RDS_with_doublets, eval=TRUE, include = FALSE}
+seurat_integrated <- readRDS("seurat_integrated_doubletFinder.rds")
+```
+
+```{r, fig.width = 10, fig.height = 8}
+DimPlot(seurat_integrated, reduction = "umap", label = TRUE)
+DimPlot(seurat_integrated, reduction = "umap", label = FALSE, group.by = "Doublet")
+FeaturePlot(seurat_integrated, features = c("percent.rib","percent.mt","nCount_RNA","nFeature_RNA"), min.cutoff = "q10", max.cutoff = "q90", ncol = 2, cols = c("gray","red"))
+DimPlot(seurat_integrated, reduction = "umap", label = FALSE, split.by = "Doublet")
+```
+
+```{r}
+seurat_integrated$Clusters <- Idents(seurat_integrated)
+ggplot(data=seurat_integrated@meta.data, aes(Clusters)) +
+  geom_bar(aes(fill=Doublet), position="fill") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 0.5, vjust = 0.5)) +
+  ylab('Proportion of cells')
+
+ggplot(data=seurat_integrated@meta.data, aes(Sample)) +
+  geom_bar(aes(fill=Doublet), position="fill") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 0.5, vjust = 0.5)) +
+  ylab('Proportion of cells')
+```
+
+
+```{r, fig.height=3, fig.width = 5}
+VlnPlot(seurat_integrated, features = "percent.mt", pt.size = 0.01) +
+   theme(axis.text.x=element_text(angle=90, hjust = 1, vjust = 0.5)) + NoLegend()
+VlnPlot(seurat_integrated, features = "percent.rib", pt.size = 0.01) +
+   theme(axis.text.x=element_text(angle=90, hjust = 1, vjust = 0.5)) + NoLegend()
+VlnPlot(seurat_integrated, features = "nCount_RNA", pt.size = 0.01) +
+   theme(axis.text.x=element_text(angle=90, hjust = 1, vjust = 0.5)) + NoLegend()
+VlnPlot(seurat_integrated, features = "nFeature_RNA", pt.size = 0.01) +
+   theme(axis.text.x=element_text(angle=90, hjust = 1, vjust = 0.5)) + NoLegend()
+VlnPlot(seurat_integrated, features = "MALAT1", pt.size = 0.01) +
+   theme(axis.text.x=element_text(angle=90, hjust = 1, vjust = 0.5)) + NoLegend()
+```
+
+
+```{r, fig.width = 10, fig.height = 8}
+qual_col_pals = brewer.pal.info[brewer.pal.info$category == 'qual',]
+col_vector = unlist(mapply(brewer.pal, qual_col_pals$maxcolors, rownames(qual_col_pals)))[-4]
+DimPlot(seurat_integrated, reduction = "umap", label = TRUE, cols = col_vector)
+```
+
+```{r}
+features_test <- c("SOX9","NFIB",      # ASTRO transformation
+                   "CD44","GJA1","S100B", #General ASTRO
+                   "GFAP","VIM",                      # Reactive ASTRO
+                   "EPCAM","CDH1","CLDN7",  #Maturated iPSC from fibroblats
+                   "SLC17A6","ISL1",
+                   "MAP2","SYP","DCX","STMN1","TH", #Neuronal
+                   "MALAT1","percent.mt"
+                 )
+```
+
+
+```{r echo=FALSE, fig.height=6, fig.width = 6.2}
+seurat_integrated@active.ident <- factor(seurat_integrated@active.ident,
+                               levels = c("1","2","15","10","3","16","8","12","7","4","6","11","0","14","13","5","9"))
+DotPlot(seurat_integrated, features = features_test) + theme(axis.text.x=element_text(angle=90, hjust = 1, vjust = 0.5)) +
+  geom_vline(xintercept = c(7.5,10.5), color = "darkgreen", linetype = 2) +
+  geom_vline(xintercept = c(17.5), color = "darkgreen", linetype = 1) +
+  geom_hline(yintercept = c(6.5,9.5,15.5), color = "red", linetype = 2) +
+  geom_hline(yintercept = c(12.5), color = "red", linetype = 1)
+```
+
+
+```{r eval=FALSE}
+seurat_integrated <- RenameIdents(seurat_integrated,
+                                  '0' = "iNs",
+                                  '1' = "iAs",
+                                  '2' = "iAs",
+                                  '3' = "iAs",
+                                  '4' = "debris",
+                                  '5' = "debris",
+                                  '6' = "debris",
+                                  '7' = "iPSCs/iAs",
+                                  '8' = "iPSCs/iAs",
+                                  '9' = "debris",
+                                  '10' = "iAs",
+                                  '11' = "debris",
+                                  '12' = "iPSCs/iAs",
+                                  '13' = "iNs",
+                                  '14' = "iNs",
+                                  '15' = "iAs",
+                                  '16' = "iAs"
+                                  )
+```
+
+```{r eval = FALSE}
+saveRDS(seurat_integrated,"seurat_final_integrated_names.rds")
+```
+
+```{r, eval = TRUE, include = FALSE}
+seurat_integrated <- readRDS("seurat_final_integrated_names.rds")
+```
+
+
+
+```{r, fig.width = 8, fig.height = 5}
+seurat_integrated@active.ident <- factor(seurat_integrated@active.ident,
+                               levels = c("iAs","iPSCs/iAs","iNs","debris"))
+DimPlot(seurat_integrated, reduction = "umap", label = FALSE)
+DimPlot(seurat_integrated, reduction = "umap", label = TRUE, cols = col_vector) + NoLegend()
+DotPlot(seurat_integrated, features = features_test) + theme(axis.text.x=element_text(angle=90, hjust = 1, vjust = 0.5))
+```
+
+
+```{r eval = FALSE}
+seurat_integrated$cell_type_1 <- Idents(seurat_integrated)
+seurat_final <- subset(seurat_integrated, subset = cell_type_1 != "debris")
+```
+
+
+```{r eval = FALSE}
+rm(seurat_integrated)
+saveRDS(seurat_final,"seurat_final_subset.rds")
+```
+
+```{r, eval = TRUE, include = FALSE}
+seurat_final <- readRDS("seurat_final_subset.rds")
+```
+
+```{r}
+ids <- unique(seurat_final@meta.data$Sample)
+categories <- unique(seurat_final@meta.data$cell_type_1)
+counts <- matrix(nrow=length(ids), ncol=length(categories))
+rownames(counts) <- ids
+colnames(counts) <- categories
+
+for (i in seq_along(ids)) {
+  for (j in seq_along(categories)) {
+    count <- seurat_final@meta.data %>%
+      filter(Sample == ids[i], cell_type_1 == categories[j]) %>%
+      nrow()
+
+    counts[i, j] <- count
+  }
+}
+
+
+counts_mm_0 <- melt(counts, id = "rownames")
+ggplot(data = counts_mm_0, aes(x = Var2, y = value, fill = Var1)) + 
+  geom_col(position = "dodge") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) +
+  ylab('Proportion of cells')
+
+
+counts <- counts[, c(2,3,1)]
+counts <- counts/rowSums(counts)
+
+
+counts_mm_1 <- melt(counts, id = "rownames")
+ggplot(data = counts_mm_1, aes(x = Var2, y = value, fill = Var1)) + 
+  geom_col(position = "dodge") +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) +
+  ylab('Proportion of cells') +
+  xlab("") + ggtitle("") + 
+  theme(axis.text = element_text(family = "sans", size = 14, face = "bold", color = "black"),
+        axis.title = element_text(family = "sans", size = 14, face = "bold"))
+```
+
+
+```{r, fig.width = 8, fig.height = 5}
+DimPlot(seurat_final, reduction = "umap", label = TRUE, cols = col_vector[-c(4)])
+DimPlot(seurat_final, reduction = "umap", label = FALSE, cols = col_vector[-c(4)])
+```
+
+
+```{r, eval = FALSE, warning=FALSE}
+seurat_final <- SCTransform(seurat_final, assay = "RNA", new.assay.name = "SCT_2", verbose = TRUE, return.only.var.genes = TRUE, n_genes = NULL, variable.features.n = NULL)
+```
+
+
+```{r}
+Idents(seurat_final) <- seurat_final$cell_type_1
+```
+
+
+
+```{r eval = FALSE}
+all_markers <- FindAllMarkers(seurat_final[substr(rownames(seurat_final),1,3) != "MT-" &
+                                             substr(rownames(seurat_final),1,3) != "RPL" &
+                                             substr(rownames(seurat_final),1,3) != "RPS",],
+                              min.pct = 0.25, only.pos = TRUE, verbose = TRUE, assay = "SCT_2")
+```
+
+
+```{r eval=FALSE}
+saveRDS(all_markers,"all_markers_final.rds")
+write.csv(all_markers,"all_markers.csv")
+```
+
+```{r read_markers, eval=TRUE, include = FALSE}
+all_markers <- readRDS("all_markers_final.rds")
+```
+
+```{r}
+datatable(all_markers %>% group_by(cluster) %>% top_n(n = 20, wt = avg_log2FC))
+```
+
+
+```{r clusters_annotation, eval = FALSE}
+scCATCH_obj <- createscCATCH(data = seurat_final@assays$SCT_2@data, cluster = as.vector(seurat_final@meta.data$cell_type_1))
+scCATCH_obj <- findmarkergene(object = scCATCH_obj,
+                              species = "Human",
+                              marker = cellmatch,
+                              cancer = "Normal",
+                              tissue = c("Brain","Embryonic brain","Fetal brain","Pluripotent stem cell"),
+                              cell_min_pct = 0.5,
+                              logfc = 0.5,
+                              pvalue = 0.01,
+                              verbose = TRUE)
+scCATCH_obj <- findcelltype(scCATCH_obj)
+```
+
+
+```{r eval=FALSE}
+saveRDS(scCATCH_obj,"annotation_all_final.rds")
+```
+
+```{r read_annotation, eval=TRUE, include = FALSE}
+scCATCH_obj <- readRDS("annotation_all_final.rds")
+```
+
+
+```{r}
+datatable(scCATCH_obj@celltype[,-2])
+```
+
+
+```{r}
+ggplot(data=seurat_final@meta.data, aes(Sample)) +
+  geom_bar(aes(fill=cell_type_1), position="fill") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  ylab('Proportion of cells')
+
+ggplot(data=seurat_final@meta.data, aes(cell_type_1)) +
+  geom_bar(aes(fill=Sample), position="fill") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  ylab('Proportion of cells')
+```
+
+
+```{r, fig.height=6, fig.width = 7.5}
+Idents(seurat_final) <- seurat_final$cell_type_1
+
+DotPlot(seurat_final, features = features_test) + theme(axis.text.x=element_text(angle=90, hjust = 1, vjust = 0.5))
+
+DoHeatmap(subset(seurat_final, downsample = 100), features = features_test, size = 3) + NoLegend()
+```
+
+
+
+```{r eval = TRUE}
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+```
+
+
+```{r eval = TRUE}
+seurat_final <- CellCycleScoring(seurat_final, s.features = s.genes, g2m.features = g2m.genes, set.ident = FALSE)
+```
+
+
+```{r eval = FALSE}
+saveRDS(seurat_final,"seurat_final_cell_cylce.rds")
+```
+
+```{r, eval = TRUE, include = FALSE}
+seurat_final <- readRDS("seurat_final_cell_cylce.rds")
+```
+
+
+```{r, fig.width = 8, fig.height = 5}
+DimPlot(seurat_final, reduction = "umap", label = FALSE, group.by = "Phase")
+DimPlot(seurat_final, reduction = "umap", label = FALSE, split.by = "Phase", cols = col_vector)
+```
+
+```{r}
+ggplot(data=seurat_final@meta.data, aes(cell_type_1)) +
+  geom_bar(aes(fill=Phase), position="fill") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) +
+  ylab('Proportion of cells')
+
+ggplot(data=seurat_final@meta.data, aes(Sample)) +
+  geom_bar(aes(fill=Phase), position="fill") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) +
+  ylab('Proportion of cells')
+```
+

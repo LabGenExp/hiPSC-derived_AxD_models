@@ -1,0 +1,601 @@
+---
+title: "scRNA-Seq Lund AxD"
+author: "Pavel"
+date: "16 4 2021"
+output: html_document
+---
+
+Load required package
+```{r, message=FALSE, warning=FALSE, paged.print=TRUE}
+suppressMessages(library("scater"))
+suppressMessages(library("pheatmap"))
+suppressMessages(library("RColorBrewer"))
+suppressMessages(library("ggplot2"))
+suppressMessages(library("Seurat"))
+suppressMessages(library("sctransform"))
+suppressMessages(library("DT"))
+suppressMessages(library("scales"))
+suppressMessages(library("ggrepel"))
+suppressMessages(library("dplyr"))
+suppressMessages(library("SeuratWrappers"))
+suppressMessages(library("scmap"))
+suppressMessages(library("reshape2"))
+suppressMessages(library("clustree"))
+suppressMessages(library("R.utils"))
+suppressMessages(library("Nebulosa"))
+suppressMessages(library("monocle3"))
+suppressMessages(library("DoubletFinder"))
+suppressMessages(library("cerebroApp"))
+```
+
+
+```{r}
+samples<-read.table("../samples.csv",header=TRUE,sep=",")
+qual_col_pals = brewer.pal.info[brewer.pal.info$category == 'qual',]
+col_vector = unlist(mapply(brewer.pal, qual_col_pals$maxcolors, rownames(qual_col_pals)))[-4]
+```
+
+
+```{r}
+seurat_iPSC_iA <- readRDS("seurat_iPSC_iA_reduced.rds")
+seurat_iNs <- readRDS("seurat_iN.rds")
+```
+
+```{r}
+seurat_all <- merge(seurat_iPSC_iA, seurat_iNs)
+seurat_all@meta.data <- seurat_all@meta.data[,substr(colnames(seurat_all@meta.data),1,11) != "sct_pca_res"]
+```
+
+#DoubletFinder
+
+
+```{r, eval=FALSE, message=FALSE, warning=FALSE}
+seurat_SCT <- NULL
+#Pre-process
+for(i in 1:nrow(samples)) {
+  seurat_SCT[[i]] <- seurat_all[,seurat_all$Sample == names(table(seurat_all$Sample))[i]]
+  seurat_SCT[[i]] <- SCTransform(seurat_SCT[[i]],verbose = TRUE, return.only.var.genes = TRUE,assay = "RNA", n_genes = NULL, variable.features.n = NULL)
+  seurat_SCT[[i]] <- RunPCA(seurat_SCT[[i]], npcs = 20, verbose = FALSE)
+  seurat_SCT[[i]] <- RunUMAP(seurat_SCT[[i]], dims = 1:20, verbose = FALSE)
+  Idents(seurat_SCT[[i]]) <- as.matrix(Idents(seurat_all))[row.names(as.matrix(Idents(seurat_SCT[[i]]))),]
+}
+```
+
+```{r eval=FALSE}
+saveRDS(seurat_SCT,"seurat_SCT_UMAP_2.rds")
+```
+
+```{r read_SCT_after_UMAP, eval = TRUE, include = FALSE}
+seurat_SCT <- readRDS("seurat_SCT_UMAP_2.rds")
+```
+
+
+```{r eval = FALSE, message=FALSE, warning=FALSE, include=TRUE}
+#pK Identification (no ground-truth)
+sweep.res.list <- as.list(NULL)
+sweep.stats <- as.list(NULL)
+bcmvn <- as.list(NULL)
+bcmvn_pK_value <- as.vector(NULL)
+p_bcmvn <- as.list(NULL)
+
+for(i in 1:length(table(seurat_all$Sample))) {
+  DefaultAssay(seurat_SCT[[1]]) <- "SCT"
+  suppressWarnings(sweep.res.list[[i]] <- paramSweep_v3(seurat_SCT[[i]], PCs = 1:20, sct = TRUE, num.cores = 1))
+  sweep.stats[[i]] <- summarizeSweep(sweep.res.list[[i]], GT = FALSE)
+  bcmvn[[i]] <- find.pK(sweep.stats[[i]])
+  
+  bcmvn_BC_value <- max(bcmvn[[i]]$BCmetric)
+  bcmvn_pK_value[i] <- as.numeric(as.vector(bcmvn[[i]][bcmvn[[i]]$BCmetric == bcmvn_BC_value,]$pK))
+}
+```
+
+```{r eval = FALSE}
+saveRDS(sweep.res.list,"sweep.res.list2.rds")
+saveRDS(sweep.stats,"sweep.stats2.rds")
+saveRDS(bcmvn_pK_value,"bcmvn_pK_value2.rds")
+saveRDS(bcmvn,"bcmvn2.rds")
+saveRDS(p_bcmvn,"p_bcmvn2.rds")
+```
+
+```{r read_pK_analysis, eval = TRUE, include = FALSE}
+bcmvn_pK_value <- readRDS("bcmvn_pK_value2.rds")
+bcmvn <- readRDS("bcmvn2.rds")
+```
+
+
+```{r print_pK_test, include = TRUE, eval = TRUE}
+for(i in 1:length(table(seurat_all$Sample))) {
+  p <- qplot(as.numeric(as.vector(bcmvn[[i]]$pK)), bcmvn[[i]]$BCmetric, geom = "line") +
+    geom_vline(xintercept = bcmvn_pK_value[i], color = "red", linetype = 2) +
+    annotate("text",
+             x = if (bcmvn_pK_value[i] < 0.2) {
+               bcmvn_pK_value[i] + 0.05
+               } else {
+               bcmvn_pK_value[i] - 0.05
+               },
+             y = 100,
+             label = paste0("Optimal pK = ",bcmvn_pK_value[i]),
+             color = "red") +
+    labs(x = "pK", y = expression(BC[mvn]), title = names(table(seurat_all$Sample))[i])
+  print(p)
+}
+```
+
+
+
+```{r, eval = FALSE}
+#Homotypic Doublet Proportion Estimate
+annotations <- as.list(NULL)
+homotypic.prop <- as.vector(NULL)
+nExp_poi <- as.vector(NULL)
+nExp_poi.adj <- as.vector(NULL)
+
+for(i in 1:length(table(seurat_all$Sample))) {
+  annotations[[i]] <- as.character(Idents(seurat_SCT[[i]]))
+  homotypic.prop[i] <- modelHomotypic(annotations[[i]])
+  nExp_poi[i] <- round(0.08*length(row.names(seurat_SCT[[i]]@meta.data)))  ## Assuming 8% doublet formation rate
+  nExp_poi.adj[i] <- round(nExp_poi[i]*(1-homotypic.prop[i]))
+}
+```
+
+```{r, eval = FALSE}
+rm(annotations,homotypic.prop)
+saveRDS(nExp_poi,"nExp_poi2.rds")
+saveRDS(nExp_poi.adj,"nExp_poi_adj2.rds")
+```
+
+```{r read_nExp, eval = TRUE, include = FALSE}
+nExp_poi <- readRDS("nExp_poi2.rds")
+nExp_poi.adj <- readRDS("nExp_poi_adj2.rds")
+```
+
+```{r eval=FALSE, message=FALSE, warning=FALSE}
+for(i in 1:length(table(seurat_all$Sample))) {
+  suppressWarnings(seurat_SCT[[i]] <- doubletFinder_v3(seurat_SCT[[i]], PCs = 1:10, pN = 0.25, pK = bcmvn_pK_value[i], nExp = nExp_poi[i],
+                                      reuse.pANN = FALSE, sct = TRUE))
+  suppressWarnings(seurat_SCT[[i]] <- doubletFinder_v3(seurat_SCT[[i]], PCs = 1:10, pN = 0.25, pK = bcmvn_pK_value[i], nExp = nExp_poi.adj[i],
+                                      reuse.pANN = paste0("pANN_0.25_",bcmvn_pK_value[i],"_",nExp_poi[i]), sct = TRUE))
+}
+```
+
+
+```{r eval=FALSE}
+saveRDS(seurat_SCT,"seurat_SCT_doubletFinder_2.rds")
+```
+
+```{r read_tables_with_doublets, eval=TRUE, include = FALSE}
+seurat_SCT <- readRDS("seurat_SCT_doubletFinder_2.rds")
+```
+
+```{r, eval = FALSE}
+seurat_dublets_all <- data.frame(NULL)
+
+for(i in 1:length(table(seurat_all$Sample))) {
+  seurat_dublets <- seurat_SCT[[i]]@meta.data[,colnames(seurat_SCT[[i]]@meta.data) == paste0("DF.classifications_0.25_",bcmvn_pK_value[i],"_",nExp_poi[i]) |
+    colnames(seurat_SCT[[i]]@meta.data) == paste0("DF.classifications_0.25_",bcmvn_pK_value[i],"_",nExp_poi.adj[i])]
+  colnames(seurat_dublets) <- c("Low Confidence","High Confidence")
+  seurat_dublets_all <- rbind(seurat_dublets_all,seurat_dublets)
+}
+
+seurat_all$Doublet <- c(apply(seurat_dublets_all,1,
+                                     function(x){
+                                       if(x[1]==x[2])
+                                         if(x[1]=="Singlet")
+                                           "Singlet"
+                                         else "Doublet - High Confidence"
+                                       else "Doublet - Low Confidence"}))
+```
+
+
+```{r eval=FALSE}
+gc()
+rm(bcmvn,bcmvn_BC_value,bcmvn_pK_value,i,nExp_poi,nExp_poi.adj,p,p_bcmvn,seurat_dublets,seurat_dublets_all,seurat_SCT,sweep.res.list,sweep.stats)
+saveRDS(seurat_all,"seurat_all_doubletFinder.rds")
+```
+
+```{r read_all_cells_RDS_with_doublets, eval=TRUE, include = FALSE}
+seurat_all <- readRDS("seurat_all_doubletFinder.rds")
+```
+
+
+```{r}
+seurat_iPSC_iA$Doublet <- seurat_all[,colnames(seurat_iPSC_iA)]@meta.data$Doublet
+seurat_iNs$Doublet <- seurat_all[,colnames(seurat_iNs)]@meta.data$Doublet
+```
+
+
+
+```{r}
+saveRDS(seurat_iPSC_iA,"seurat_iPSC_iA_reduced_Doublet.rds")
+saveRDS(seurat_iNs,"seurat_iN_Doublet.rds")
+```
+
+```{r}
+seurat_iPSC_iA <- readRDS("seurat_iPSC_iA_reduced_Doublet.rds")
+seurat_iNs <- readRDS("seurat_iN_Doublet.rds")
+```
+
+
+
+```{r, fig.width = 10, fig.height = 8}
+DimPlot(seurat_iPSC_iA, reduction = "umap", label = TRUE)
+DimPlot(seurat_iPSC_iA, reduction = "umap", label = FALSE, group.by = "Doublet")
+FeaturePlot(seurat_iPSC_iA, features = c("percent.rib","percent.mt","nCount_RNA","nFeature_RNA"), min.cutoff = "q10", max.cutoff = "q90", ncol = 2, cols = c("gray","red"))
+DimPlot(seurat_iPSC_iA, reduction = "umap", label = FALSE, split.by = "Doublet")
+
+
+DimPlot(seurat_iNs, reduction = "umap", label = TRUE)
+DimPlot(seurat_iNs, reduction = "umap", label = FALSE, group.by = "Doublet")
+FeaturePlot(seurat_iNs, features = c("percent.rib","percent.mt","nCount_RNA","nFeature_RNA"), min.cutoff = "q10", max.cutoff = "q90", ncol = 2, cols = c("gray","red"))
+DimPlot(seurat_iNs, reduction = "umap", label = FALSE, split.by = "Doublet")
+```
+
+
+```{r, fig.height=12, fig.width=8}
+clustree(seurat_iPSC_iA, prefix = "sct_pca_res.")
+```
+
+
+```{r}
+seurat_iPSC_iA$cell_type_2 <- seurat_iPSC_iA$sct_pca_res.0.3
+seurat_iPSC_iA@meta.data <- seurat_iPSC_iA@meta.data[,substr(colnames(seurat_iPSC_iA@meta.data),1,11) != "sct_pca_res"]
+levels(seurat_iPSC_iA$cell_type_2)[levels(seurat_iPSC_iA$cell_type_2) == "0"] <- "ASTRO_1"
+levels(seurat_iPSC_iA$cell_type_2)[levels(seurat_iPSC_iA$cell_type_2) == "2"] <- "ASTRO_2"
+levels(seurat_iPSC_iA$cell_type_2)[levels(seurat_iPSC_iA$cell_type_2) == "3"] <- "ASTRO_3"
+levels(seurat_iPSC_iA$cell_type_2)[levels(seurat_iPSC_iA$cell_type_2) == "1"] <- "ASTRO_4"
+seurat_iPSC_iA <- subset(seurat_iPSC_iA, subset = cell_type_2 %in% c("ASTRO_1","ASTRO_2","ASTRO_3","ASTRO_4"))
+seurat_iPSC_iA$cell_type_2   <- factor(as.character(seurat_iPSC_iA$cell_type_2), levels = c("ASTRO_1","ASTRO_2","ASTRO_3","ASTRO_4"))
+seurat_iPSC_iA$cell_type_3 <- seurat_iPSC_iA$cell_type_2
+levels(seurat_iPSC_iA$cell_type_3)[levels(seurat_iPSC_iA$cell_type_3) == "ASTRO_1"] <- "HSPB6+/ITGA7+"
+levels(seurat_iPSC_iA$cell_type_3)[levels(seurat_iPSC_iA$cell_type_3) == "ASTRO_2"] <- "GFAP+/S100B+"
+levels(seurat_iPSC_iA$cell_type_3)[levels(seurat_iPSC_iA$cell_type_3) == "ASTRO_3"] <- "Collagen rich"
+levels(seurat_iPSC_iA$cell_type_3)[levels(seurat_iPSC_iA$cell_type_3) == "ASTRO_4"] <- "EPCAM+/CDH1+"
+
+
+
+
+seurat_iNs$cell_type_2 <- seurat_iNs$sct_pca_res.0.4
+seurat_iNs@meta.data <- seurat_iNs@meta.data[,substr(colnames(seurat_iNs@meta.data),1,11) != "sct_pca_res"]
+levels(seurat_iNs$cell_type_2)[levels(seurat_iNs$cell_type_2) == "0"] <- "NEURO_1"
+levels(seurat_iNs$cell_type_2)[levels(seurat_iNs$cell_type_2) == "1"] <- "NEURO_2"
+levels(seurat_iNs$cell_type_2)[levels(seurat_iNs$cell_type_2) == "3"] <- "NEURO_3"
+levels(seurat_iNs$cell_type_2)[levels(seurat_iNs$cell_type_2) == "4"] <- "NEURO_5"
+levels(seurat_iNs$cell_type_2)[levels(seurat_iNs$cell_type_2) == "5"] <- "NEURO_4"
+seurat_iNs <- subset(seurat_iNs, subset = cell_type_2 != c("2"))
+seurat_iNs$cell_type_2   <- factor(as.character(seurat_iNs$cell_type_2), levels = c("NEURO_1","NEURO_2","NEURO_3","NEURO_4","NEURO_5"))
+```
+
+```{r}
+DimPlot(seurat_iPSC_iA, reduction = "umap", label = TRUE, group.by = "cell_type_2", cols = col_vector)
+DimPlot(seurat_iPSC_iA, reduction = "umap", label = TRUE, group.by = "cell_type_3", cols = col_vector)
+DimPlot(seurat_iPSC_iA, reduction = "umap", label = FALSE, group.by = "Genotype")
+DimPlot(seurat_iPSC_iA, reduction = "umap", label = FALSE, group.by = "Condition")
+DimPlot(seurat_iPSC_iA, reduction = "umap", label = TRUE, group.by = "cell_type")
+#plot_density(seurat_iPSC_iA, features = c("NFIB","SOX9","GLUL","VIM","CD44","GJA1","GFAP","S100B","EPCAM","CDH1","SLC1A3","C3"), pal = "inferno")
+#plot_density(seurat_iPSC_iA, features = c("ITGA6","ITGA3","F3","ERBB2"), pal = "inferno")
+FeaturePlot(seurat_iPSC_iA, features = c("ITGA6"), min.cutoff = "q10", max.cutoff = "q90")
+FeaturePlot(seurat_iPSC_iA, features = c("percent.mt"), min.cutoff = "q10", max.cutoff = "q90")
+
+
+DimPlot(seurat_iNs, reduction = "umap", label = TRUE, group.by = "cell_type_2", cols = col_vector)
+DimPlot(seurat_iNs, reduction = "umap", label = FALSE, group.by = "Genotype")
+DimPlot(seurat_iNs, reduction = "umap", label = FALSE, group.by = "Condition")
+DimPlot(seurat_iNs, reduction = "umap", label = TRUE, group.by = "cell_type")
+```
+
+
+```{r}
+markers_iPSCs <- FindMarkers(seurat_iPSC_iA,
+                                           ident.1 = c("ASTRO_1"),
+                                           ident.2 = NULL,
+                                           group.by = "cell_type_2",
+                                           min.pct = 0.25,
+                                           only.pos = FALSE,
+                                           verbose = TRUE,
+                                           assay = "SCT",
+                                           test.use = "wilcox")
+write.csv(markers_iPSCs,"markers_iPSCs.csv")
+```
+
+
+
+
+```{r}
+ids <- unique(seurat_iPSC_iA@meta.data$Sample)
+categories <- unique(seurat_iPSC_iA@meta.data$cell_type_2)
+counts <- matrix(nrow=length(ids), ncol=length(categories))
+rownames(counts) <- ids
+colnames(counts) <- categories
+
+for (i in seq_along(ids)) {
+  for (j in seq_along(categories)) {
+    count <- seurat_iPSC_iA@meta.data %>%
+      filter(Sample == ids[i], cell_type_2 == categories[j]) %>%
+      nrow()
+
+    counts[i, j] <- count
+  }
+}
+
+
+counts <- counts[, order(colnames(counts))]
+counts <- counts/rowSums(counts)
+counts_mm_1 <- melt(counts, id = "rownames")
+
+ggplot(data = counts_mm_1, aes(x = as.factor(Var2), y = value, fill = Var1)) + 
+  geom_col(position = "dodge") +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) +
+  ylab('Proportion of cells') +
+  xlab("") + ggtitle("") + 
+  theme(axis.text = element_text(family = "sans", size = 10, face = "plain", color = "black"),
+        axis.title = element_text(family = "sans", size = 10, face = "plain"))
+
+
+
+
+ids <- unique(seurat_iNs@meta.data$Sample)
+categories <- unique(seurat_iNs@meta.data$cell_type_2)
+counts <- matrix(nrow=length(ids), ncol=length(categories))
+rownames(counts) <- ids
+colnames(counts) <- categories
+
+for (i in seq_along(ids)) {
+  for (j in seq_along(categories)) {
+    count <- seurat_iNs@meta.data %>%
+      filter(Sample == ids[i], cell_type_2 == categories[j]) %>%
+      nrow()
+
+    counts[i, j] <- count
+  }
+}
+
+
+counts <- counts[, order(colnames(counts))]
+counts <- counts/rowSums(counts)
+counts_mm_1 <- melt(counts, id = "rownames")
+
+ggplot(data = counts_mm_1, aes(x = as.factor(Var2), y = value, fill = Var1)) + 
+  geom_col(position = "dodge") +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) +
+  ylab('Proportion of cells') +
+  xlab("") + ggtitle("") + 
+  theme(axis.text = element_text(family = "sans", size = 10, face = "plain", color = "black"),
+        axis.title = element_text(family = "sans", size = 10, face = "plain"))
+```
+
+
+
+```{r eval=FALSE}
+saveRDS(seurat_iPSC_iA,"seurat_iPSC_iA_filtered.rds")
+saveRDS(seurat_iNs,"seurat_iNs_filtered.rds")
+```
+
+```{r read_SCT_after_UMAP, eval = TRUE, include = FALSE}
+seurat_iPSC_iA <- readRDS("seurat_iPSC_iA_filtered.rds")
+seurat_iPSC_iA$Sample <- factor(seurat_iPSC_iA$Sample, levels = c("Ctrl_wt","Ctrl_w_a","Ctrl_AxD","OGD_wt","OGD_w_a","OGD_AxD"))
+
+seurat_iNs <- readRDS("seurat_iNs_filtered.rds")
+seurat_iNs$Sample <- factor(seurat_iNs$Sample, levels = c("Ctrl_wt","Ctrl_w_a","Ctrl_AxD","OGD_wt","OGD_w_a","OGD_AxD"))
+```
+
+
+
+
+```{r}
+seurat_NEURO_subset <- subset(seurat_iNs, subset = cell_type_2 != c("NEURO_5"))
+```
+
+```{r}
+DimPlot(seurat_NEURO_subset, reduction = "umap", label = TRUE, group.by = "cell_type_2", cols = col_vector)
+```
+
+```{r}
+markers <- FindMarkers(seurat_NEURO_subset,
+                                           ident.1 = c("AxD_AxD"),
+                                           ident.2 = c("WT_AxD","WT_WT"),
+                                           group.by = "Genotype",
+                                           min.pct = 0.25,
+                                           only.pos = FALSE,
+                                           verbose = TRUE,
+                                           assay = "SCT",
+                                           test.use = "wilcox")
+```
+
+Ctrl_AxD Ctrl_w_a  Ctrl_wt  OGD_AxD  OGD_w_a   OGD_wt 
+
+
+```{r}
+seurat_iA_subset <- subset(seurat_iPSC_iA, subset = Genotype == "WT_WT")
+seurat_iA_subset <- subset(seurat_iPSC_iA, subset = Genotype == "WT_AxD")
+seurat_iA_subset <- subset(seurat_iPSC_iA, subset = Genotype == "AxD_AxD")
+markers <- FindMarkers(seurat_iA_subset,
+#markers <- FindMarkers(subset(seurat_iA_subset, subset = cell_type_2 %in% c("ASTRO_4")),
+                                           ident.1 = c("OGD"),
+                                           ident.2 = c("Ctrl"),
+                                           group.by = "Condition",
+                                           min.pct = 0.25,
+                                           only.pos = FALSE,
+                                           verbose = TRUE,
+                                           assay = "SCT",
+                                           test.use = "wilcox")
+```
+
+
+
+```{r}
+#datatable(markers_IAA)
+#write.csv(markers_iPSCs,"markers_iPSCs.csv")
+```
+
+```{r}
+reverselog_trans <- function(base = exp(1)) {
+    trans <- function(x) -log(x, base)
+    inv <- function(x) base^(-x)
+    trans_new(paste0("reverselog-", format(base)), trans, inv, 
+              log_breaks(base = base), 
+              domain = c(1e-100, Inf))
+}
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+list_gene_names_down <- rownames(markers[markers$avg_log2FC > 0.5 & markers$p_val_adj < 0.05,])
+list_gene_names_up <- rownames(markers[markers$avg_log2FC < -0.5 & markers$p_val_adj < 0.05,])
+
+
+topT <- markers
+topT <- topT[order(-topT$p_val_adj),]
+topT$p_val_adj[topT$p_val_adj < 1e-300] <- 1e-300
+ggplot(aes(x = avg_log2FC, y = p_val_adj), data = topT) +
+  labs(y = expression(Log[10]*"(adjusted p-value)"),
+       x = expression(Log[2]*"(fold change)"),
+       title = expression("AxD_AxD OGD vs Ctrl")) +
+    #xlim(-1.5,1.5) +
+  geom_point(color = ifelse(topT$p_val_adj < 0.1 & !is.na(topT$p_val_adj) & abs(topT$avg_log2FC) > 0.5, "red","black")) +
+  scale_y_continuous(trans = reverselog_trans(10)) +
+  theme(legend.position = "none") +
+
+   # downregulated
+  geom_point(data = topT[toupper(rownames(topT)) %in% toupper(list_gene_names_down),], pch = 21, fill = NA, cex = 3, colour = "dodgerblue") +
+  
+  # upregulated
+  geom_point(data = topT[toupper(rownames(topT)) %in% toupper(list_gene_names_up),], pch = 21, fill = NA, cex = 3, colour = "darkred") +
+  
+  # add label names
+  geom_label_repel(data = topT[toupper(rownames(topT)) %in% toupper(list_gene_names_up),],
+                   aes(label = rownames(topT[toupper(rownames(topT)) %in% toupper(list_gene_names_up),])),
+                   box.padding   = 0.35, 
+                   point.padding = 0.5,
+                   color = "darkred",
+                   size = 4,
+  #                 xlim = c(-0.5,0.25),
+  #                 ylim = c(7.5,11.5),
+                   max.iter = 20000) +
+  geom_label_repel(data = topT[toupper(rownames(topT)) %in% toupper(list_gene_names_down),],
+                   aes(label = rownames(topT[toupper(rownames(topT)) %in% toupper(list_gene_names_down),])),
+                   box.padding   = 0.01, 
+                   point.padding = 0.5,
+                   color = "dodgerblue",
+                   size = 4,
+  #                 xlim = c(0.25,1),
+  #                 ylim = c(0.1,7.5),
+                   max.iter = 20000) +
+ theme(panel.border = element_blank(),
+      panel.grid.major = element_line(colour = "#d3d3d3"),
+      panel.grid.minor = element_blank(),
+      panel.background = element_rect(colour = "black", fill = NA),
+      plot.title = element_text(size = 10, family = "Arial", face = "bold", hjust = 0.5),
+      text=element_text(family = "Arial"),
+      axis.title = element_text(colour="black", size = 10, face="bold"),
+      axis.text.x = element_text(colour="black", size = 10, face="plain"),
+      axis.text.y = element_text(colour="black", size = 10, face="plain"),
+      axis.line = element_line(size=0.5, colour = "black"))
+```
+
+
+```{r}
+plot_density(seurat_iNs, features = c("PTH2","SYT4","SCG5","UCN","CST3","NNAT","ATP1B1","TAC1","CAMK2N1"), pal = "inferno")
+plot_density(seurat_iNs, features = c("ATP5E","BTF3","S100A10","FTL","ROMO1","SOX4"), pal = "inferno")
+plot_density(seurat_iNs, features = c("MAP2","NEUROG2","DCN","COL5A1","MAP2","NCAM1","PRPH","PHOX2B","POU4F1","LHX9","GPM6A"), pal = "inferno")
+```
+
+
+
+
+```{r}
+VlnPlot(seurat_NEURO_subset, feature = "PTH2", group.by = "Sample", pt.size = 0.1)
+VlnPlot(seurat_NEURO_subset, feature = "UCN", group.by = "Sample", pt.size = 0.1)
+VlnPlot(seurat_NEURO_subset, feature = "SCG5", group.by = "Sample", pt.size = 0.1)
+VlnPlot(seurat_NEURO_subset, feature = "ATP5E", group.by = "Sample", pt.size = 0.1)
+VlnPlot(seurat_NEURO_subset, feature = "SOX4", group.by = "Sample", pt.size = 0.1)
+```
+
+
+```{r}
+seurat_all <- merge(seurat_iPSC_iA, seurat_iNs)
+seurat_all$Sample <- factor(seurat_all$Sample, levels = c("Ctrl_wt","Ctrl_w_a","Ctrl_AxD","OGD_wt","OGD_w_a","OGD_AxD"))
+```
+
+
+```{r}
+saveRDS(seurat_all, "seurat_all_merged_for_cerebro.rds")
+```
+
+```{r}
+seurat_all <- readRDS("seurat_all_merged_for_cerebro.rds")
+```
+
+
+```{r}
+all.genes <- rownames(seurat_all)
+seurat_all <- RunPCA(seurat_all,
+                       assay = "SCT",
+                       features = all.genes,
+                       npcs = 50, verbose = FALSE,
+                       reduction.name = "pca")
+seurat_all <- RunUMAP(seurat_all, reduction = "pca", dims = 1:32, verbose = TRUE, seed.use = 1902)
+```
+
+```{r}
+saveRDS(seurat_all, "seurat_all_merged_for_cerebro_UMAP.rds")
+```
+
+```{r}
+seurat_all <- readRDS("seurat_all_merged_for_cerebro_UMAP.rds")
+```
+
+```{r}
+DimPlot(seurat_all, reduction = "umap", label = TRUE, group.by = "cell_type_2", cols = col_vector)
+```
+
+
+
+```{r eval = FALSE, include = FALSE}
+seurat_cerebro <- seurat_all
+
+keep_features <- rowSums(seurat_cerebro@assays$RNA@counts > 0) > 0
+seurat_cerebro <- seurat_cerebro[keep_features,]
+DefaultAssay(seurat_cerebro) <- "SCT"
+
+seurat_cerebro$cell_type_2 <- as.factor(as.vector(seurat_cerebro$cell_type_2))
+
+seurat_cerebro <- addPercentMtRibo(seurat_cerebro, assay = "RNA", organism = "hg", gene_nomenclature = "name")
+seurat_cerebro <- getMostExpressedGenes(seurat_cerebro, assay = "SCT", groups = c("Sample","Genotype","Condition", "cell_type_2"))
+seurat_cerebro <- getMarkerGenes(seurat_cerebro, assay = "SCT",
+                                 organism = "hg", groups = c("Sample","Genotype","Condition", "cell_type_2"),
+                                 only_pos = TRUE, min_pct = 0.25, thresh_logFC = 0.25, thresh_p_val = 0.01, test = "wilcox")
+seurat_cerebro <- getEnrichedPathways(seurat_cerebro)
+seurat_cerebro <- performGeneSetEnrichmentAnalysis(seurat_cerebro, assay = "SCT",
+                                      GMT_file = "F:/Genomes/msigdb.v7.1.symbols.gmt",
+                                      groups = c("Sample","Genotype","Condition", "cell_type_2"), parallel.sz = 10)
+```
+
+
+```{r}
+saveRDS(seurat_cerebro, "seurat_cerebro.rds")
+```
+
+```{r}
+write.csv(as.data.frame(seurat_cerebro@assays$SCT@data), "seurat_all_filtered_SCT_data.csv")
+write.csv(as.data.frame(seurat_cerebro@assays$SCT@counts), "seurat_all_filtered_SCT_counts.csv")
+```
+
+
+```{r eval = FALSE, include = FALSE}
+exportFromSeurat(object = seurat_cerebro,
+                 assay = "SCT",
+                 file = "seurat_SCT_assay.crb",
+                 experiment_name = "10x_AxD_coculture",
+                 organism = "hg",
+                 groups = c("Sample","Genotype","Condition", "cell_type_2","cell_type_3"),
+                 nUMI = "nCount_RNA",
+                 nGene = "nFeature_RNA",
+                 add_all_meta_data = TRUE)
+```
+
+```{r eval = FALSE, include = FALSE}
+launchCerebro()
+```
+
+

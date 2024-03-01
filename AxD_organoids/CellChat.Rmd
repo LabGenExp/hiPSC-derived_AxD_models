@@ -1,0 +1,205 @@
+---
+title: "CellChat organoids"
+author: "Sarka"
+date: "2/16/2023"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+load libraries
+```{r}
+library(NMF)
+library(ggalluvial)
+library(Seurat)
+library(CellChat)
+library(ComplexHeatmap)
+library(Seurat)
+```
+
+prepare data from Seurat
+```{r}
+setwd("CellChat/cortical")
+seurat <- readRDS("cortical_integrated/seurat_cortical_integrated.rds")
+sample.name <- "AxD"
+seurat.subset <- subset(seurat, subset = Genotype == sample.name)
+seurat.subset <- subset(seurat.subset, ident = c("radial glia","proliferating radial glia","oRG/astrocytes","pre-OPCs","CRABP1+ cells","intermediate progenitors","neurons 1","neurons 2"))
+seurat.subset@active.assay <- "RNA"
+
+all.genes <- rownames(seurat.subset)
+seurat.subset <- NormalizeData(seurat.subset, normalization.method = "LogNormalize", scale.factor = 10000, assay = "RNA")
+seurat.subset <- ScaleData(seurat.subset, features = all.genes, assay = "RNA")
+
+cellchat <- createCellChat(object = seurat.subset, group.by = "ident")
+saveRDS(cellchat, paste0(sample.name,"_cellchat.rds"))
+```
+
+load data
+```{r}
+cellchat <- readRDS(paste0(sample.name,"_cellchat.rds"))
+```
+
+add DB
+```{r}
+CellChatDB <- CellChatDB.human 
+showDatabaseCategory(CellChatDB)
+CellChatDB.use <- CellChatDB
+cellchat@DB <- CellChatDB.use
+```
+
+Processing
+```{r}
+cellchat <- subsetData(cellchat) # This step is necessary even if using the whole database
+  future::plan("multisession", workers = 2) # do parallel
+  cellchat <- identifyOverExpressedGenes(cellchat)
+  cellchat<- identifyOverExpressedInteractions(cellchat)
+   cellchat <- computeCommunProb(cellchat, population.size = TRUE)
+  # Filter out the cell-cell communication if there are only few number of cells in certain cell groups
+  cellchat <- filterCommunication(cellchat, min.cells = 10)
+  #df.net <- subsetCommunication(cellchat_list[[i]],slot.name = "net")
+  cellchat <- computeCommunProbPathway(cellchat)
+  cellchat <- aggregateNet(cellchat)
+  cellchat <- netAnalysis_computeCentrality(cellchat)
+  saveRDS(cellchat, paste0(sample.name,"_cellchat_processed.rds"))
+```
+
+Loading processed cellchat dataset
+```{r}
+cellchat <- readRDS(paste0(sample.name,"_cellchat_processed.rds"))
+```
+
+Interaction numbers and strength
+
+```{r}
+par(mfrow = c(1,2), xpd=TRUE)
+groupSize <- as.numeric(table(cellchat@idents))
+cir1 <- netVisual_circle(cellchat@net$count, vertex.weight = groupSize, weight.scale = T, label.edge= F, title.name = "Number of interactions")
+cir2 <- netVisual_circle(cellchat@net$weight, vertex.weight = groupSize, weight.scale = T, label.edge= F, title.name = "Interaction weights/strength")
+```
+
+Heatmap for all sinaling and cell types
+Note2: Better to render in Console -> Plots than here in rmd.
+```{r}
+pathway.show <- cellchat@netP$pathways
+ht1 <- netAnalysis_signalingRole_heatmap(cellchat, pattern = "outgoing", signaling = pathway.show, width = 8, height = 15)
+ht2 <- netAnalysis_signalingRole_heatmap(cellchat, pattern = "incoming", signaling = pathway.show, width = 8, height = 15)
+ht1+ht2
+```
+
+Signaling patterns
+```{r}
+x <-selectK(cellchat, pattern = "outgoing")
+y <-selectK(cellchat, pattern = "incoming")
+nPatternsx <- 5
+nPatternsy <- 5
+cellchat <- identifyCommunicationPatterns(cellchat, pattern = "outgoing", k = nPatternsx)
+cellchat <- identifyCommunicationPatterns(cellchat, pattern = "incoming", k = nPatternsy)
+par(mfrow=c(1,1))
+ht3 <- netAnalysis_river(cellchat, pattern = "incoming")
+ht4 <- netAnalysis_river(cellchat, pattern = "outgoing")
+```
+
+Dominant senders and receivers - cell types overall
+```{r}
+gg1 <- netAnalysis_signalingRole_scatter(cellchat)
+gg1
+```
+
+Save to rds
+```{r}
+saveRDS(cellchat, paste0(sample.name,"_cellchat_processed.rds"))
+```
+
+```{r}
+pdf(paste0(sample.name,"_result.pdf"), height = 10, width = 7)
+print(cir1)
+print(cir2)
+print(ht1)
+print(ht2)
+print(gg1)
+dev.off()
+```
+
+Compare datasets - with a little different cell type composition
+Prepare data
+```{r}
+cellchat1 <- readRDS("CTRL_cellchat_processed.rds")
+cellchat2 <- readRDS("AxD_cellchat_processed.rds")
+sample.names <- c("CTRL","AxD")
+
+# Define the cell labels to lift up
+group.new = levels(cellchat1@idents)
+cellchat2 <- liftCellChat(cellchat2, group.new)
+object.list <- list(CTRL = cellchat1, AxD = cellchat2)
+cellchat.merged <- mergeCellChat(object.list, add.names = names(object.list), cell.prefix = TRUE)
+```
+
+Supp. Fig. 7C: Compare information flow
+```{r}
+# Information flow chart (Supp. Fig), cellchat 1 = CTRL, cellchat 2 = AxD
+gg6 <- rankNet(cellchat.merged, mode = "comparison", stacked = T, do.stat = TRUE, color.use = c("#7AA3CD","#D17480"))
+ggsave("Supp_Fig7C_CellChat_infflow.png",plot = gg6 + theme(legend.position = "none"), device = "png", width = 3, height = 5.5)
+```
+
+Supp. Fig. 7D: Selected pathways, incoming/outgoing in CTRL, AxD
+```{r}
+pathways.show <- c("EGF","PDGF","ACTIVIN","NOTCH","NRG","FGF","RELN","TGFb","HH","MSTN","ncWNT")
+
+# Outgoing and incoming signaling in selected pathways
+ht1 = netAnalysis_signalingRole_heatmap(cellchat1, pattern = "outgoing", signaling = pathways.show, title = "CTRL outgoing", width = 6, height = 6)
+ht2 = netAnalysis_signalingRole_heatmap(cellchat2, pattern = "outgoing", signaling = pathways.show, title = "AxD outgoing", width = 6, height = 6)
+
+svg("Supp_Fig7D_CellChat_outgoing.svg")
+ComplexHeatmap::draw(ht1+ht2)
+dev.off()
+
+ht3 = netAnalysis_signalingRole_heatmap(cellchat1, pattern = "incoming", signaling = pathways.show, title = "CTRL incoming", width = 6, height = 6, color.heatmap = "GnBu")
+ht4 = netAnalysis_signalingRole_heatmap(cellchat2, pattern = "incoming", signaling = pathways.show, title = "AxD incoming", width = 6, height = 6, color.heatmap = "GnBu")
+
+svg("Supp_Fig7D_CellChat_incoming.svg")
+ComplexHeatmap::draw(ht3+ht4)
+dev.off()
+```
+
+Ligand-receptor pairs
+```{r}
+# cellchat 1 = CTRL, cellchat 2 = AxD 
+
+pathways.show <- c("EGF","PDGF","ACTIVIN","NOTCH","NRG","FGF")
+plots <- lapply(pathways.show, function(x) netAnalysis_contribution(cellchat1, signaling = x, title = paste0("L-R pairs in ",x)))
+ggsave("CTRL_L-Rpairs.svg", plot = egg::ggarrange(plots = plots, nrow = 3), width = 7, height = 6)
+
+pathways.show <- c("PDGF","ACTIVIN","NOTCH","NRG","FGF","RELN","TGFb","HH","MSTN","ncWNT")
+plots <- lapply(pathways.show, function(x) netAnalysis_contribution(cellchat2, signaling = x, title = paste0("L-R pairs in ",x)))
+ggsave("AxD_L-Rpairs.svg", plot = egg::ggarrange(plots = plots, ncol = 2), width = 7, height = 10)
+```
+
+Compare major sources and pathways
+```{r}
+object.list <- list(cellchat1,cellchat2); names(object.list) <- sample.names
+num.link <- sapply(object.list, function(x) {rowSums(x@net$count) + colSums(x@net$count)-diag(x@net$count)})
+weight.MinMax <- c(min(num.link), max(num.link)) # control the dot size in the different datasets
+gg5 <- list()
+for (i in 1:length(object.list)) {
+  gg5[[i]] <- netAnalysis_signalingRole_scatter(object.list[[i]], title = names(object.list)[i], weight.MinMax = weight.MinMax)
+}
+
+patchwork::wrap_plots(plots = gg5)
+ggsave("CellChat/w_a-AxD_major_sources.png",plot = patchwork::wrap_plots(plots = gg5), device = "png", width = 7, height = 5)
+
+# gg0 <- netAnalysis_signalingChanges_scatter(cellchat.merged, idents.use = "Precursors")
+# 
+# # on a single cellchat object
+# pathways.show <- c("ncWNT","NOTCH","TGFb")
+# netAnalysis_contribution(cellchat2, signaling = pathways.show)
+```
+
+Identify dysregulated ligand-receptor pairs
+```{r}
+# gg8 <- netVisual_bubble(cellchat.merged, sources.use = 4, targets.use = c(5:11),  comparison = c(1, 2), max.dataset = 2, title.name = paste0("Increased signaling in ",sample.names[2]), angle.x = 45, remove.isolate = T)
+# #> Comparing communications on a merged object
+# gg9 <- netVisual_bubble(cellchat.merged, sources.use = 4, targets.use = c(5:11),  comparison = c(1, 2), max.dataset = 1, title.name = paste0("Decreased signaling in ",sample.names[2]), angle.x = 45, remove.isolate = T)
+# #> Comparing communications on a merged object
+# gg8 + gg9
+```
+

@@ -1,0 +1,852 @@
+---
+title: "SoupX and subsequent analysis"
+author: "Zuzana"
+date: "20220221"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+reference: https://rawcdn.githack.com/constantAmateur/SoupX/204b602418df12e9fdb4b68775a8b486c6504fe4/inst/doc/pbmcTutorial.html
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval = FALSE)
+```
+
+# Import libraries
+```{r libraries}
+library(Seurat)
+library(Matrix)
+library(SeuratWrappers)
+library(SoupX)
+library(ggplot2)
+library(scales)
+library(DT)
+library(dplyr)
+library(dittoSeq)
+library(clustree)
+library(VennDiagram)
+library(data.table)
+library(gridExtra)
+library(RColorBrewer)
+library(lemon)
+```
+
+```{r}
+samples <- read.table("samples.csv",header=TRUE,sep=",")
+```
+
+
+# Prepare data
+```{r preprocessing}
+# unfiltered count matrix
+STAR <- readRDS("STAR_raw.rds")
+for (k in 1:nrow(samples)){
+  tod <- as.Seurat(x = STAR[[k]])
+  tod <- tod@assays[["RNA"]]@counts
+  saveRDS(tod, paste0("SoupX_files/",samples$SampleName[k], "_unfiltered.rds"))
+}
+rm(STAR,tod)
+
+# filtered, QC annotated count matrix
+seurat_filtered <- readRDS("seurat_final_integrated_names.rds")
+for (k in 1:nrow(samples)){
+  subset_filtered <- subset(seurat_filtered, subset = Sample == samples$SampleName[k])
+  saveRDS(subset_filtered, paste0("SoupX_files/",samples$SampleName[k],"_metadata.rds"))
+  toc <- subset_filtered@assays[["RNA"]]@counts
+  saveRDS(toc, paste0("SoupX_files/",samples$SampleName[k],"_filtered.rds"))
+  rm(subset_filtered)
+}
+rm(seurat_filtered,toc)
+
+for (k in 1:nrow(samples)){
+  tod <- readRDS(paste0("SoupX_files/",samples$SampleName[k], "_unfiltered.rds"))
+  toc <- readRDS(paste0("SoupX_files/",samples$SampleName[k],"_filtered.rds"))
+  subset_filtered <- readRDS(paste0("SoupX_files/",samples$SampleName[k],"_metadata.rds"))
+  
+  # create SoupChannel object
+  sc <- SoupChannel(tod, toc)
+
+  # add clustering info
+  sc <- setClusters(sc, setNames(subset_filtered@meta.data[["seurat_clusters"]], rownames(subset_filtered@meta.data)))
+
+  # add dimensionality reduction info
+  DR <- as.data.frame(subset_filtered@reductions[["umap"]]@cell.embeddings)
+  sc <- setDR(sc, DR = DR)
+
+  saveRDS(sc, paste0("SoupX_files/",samples$SampleName[k], "_SoupChannel.rds"))
+}
+```
+
+# Visual sanity checks and contamination estimation
+```{r qc}
+# load metadata file and SoupChannel object
+for (k in 1:nrow(samples)){
+  subset_filtered <- readRDS(paste0("SoupX_files/",samples$SampleName[k],"_metadata.rds"))
+  sc <- readRDS(paste0("SoupX_files/",samples$SampleName[k], "_SoupChannel.rds"))
+  
+  # plot original UMAP
+  dd = subset_filtered@meta.data[colnames(sc$toc), ]
+  mids = aggregate(cbind(sc$metaData[["UMAP_1"]], sc$metaData[["UMAP_2"]]) ~ seurat_clusters, data = dd, FUN = mean)
+  gg = ggplot(dd, aes(sc$metaData[["UMAP_1"]], sc$metaData[["UMAP_2"]])) + geom_point(aes(colour = subset_filtered$seurat_clusters), size = 1) + ggtitle(samples$SampleName[k]) + guides(colour = guide_legend(override.aes = list(size = 3))) #+ geom_label(data = mids, aes(label = cell_type_1))
+  plot(gg)
+  
+  # estimation contamination fraction - the automated method
+  sc = autoEstCont(sc) #,soupQuantile = 0.8, tfidfMin = 0.8)
+  saveRDS(sc, paste0("SoupX_files/",samples$SampleName[k], "_SoupChannel.rds"))
+}
+
+# # visualize gene expression
+# gene_name <- "P2ry12"
+# dd$gene_name = sc$toc[gene_name, ]
+# gg = ggplot(dd, aes(sc$metaData[["UMAP_1"]], sc$metaData[["UMAP_2"]])) + geom_point(aes(colour = gene_name > 0)) + labs(title = gene_name)
+# plot(gg)
+# 
+# # how many counts we would expect for a gene in each cell, assuming that cell contained nothing but soup
+# gg = plotMarkerMap(sc, gene_name) + labs(title = gene_name)
+# plot(gg)
+```
+
+# Correction of expression profile
+```{r correction}
+for (k in 1:nrow(samples)){
+  sc <- readRDS(paste0("SoupX_files/",samples$SampleName[k], "_SoupChannel.rds"))
+  
+  # uses clustering info provided previously
+  out = adjustCounts(sc)
+  
+  # fraction of cells that were non-zero now set to zero after correction
+  cntSoggy = rowSums(sc$toc > 0)
+  cntStrained = rowSums(out > 0)
+  mostZeroed = tail(sort((cntSoggy - cntStrained)/cntSoggy), n = 10)
+  mostZeroed
+
+  # genes for which there is a quantitative difference - usually metabolism and translation, mitochondrial genes often present in the soup
+  tail(sort(rowSums(sc$toc > out)/rowSums(sc$toc > 0)), n = 20)
+
+  saveRDS(out, paste0("SoupX_files/",samples$SampleName[k], "_corrected.rds"))
+}
+
+# # visualize original gene expression
+# gene_name <- "Cdk8"
+# dd$gene_name = sc$toc[gene_name, ]
+# gg = ggplot(dd, aes(sc$metaData[["UMAP_1"]], sc$metaData[["UMAP_2"]])) + geom_point(aes(colour = gene_name > 0)) + labs(subtitle = gene_name)
+# plot(gg)
+# 
+# # the fraction of expression in each cell that has been deemed to be soup and removed
+# plotChangeMap(sc, out, gene_name) + labs(subtitle = gene_name) 
+# 
+# # load data into Seurat
+# seurat = CreateSeuratObject(out)
+```
+
+
+## Integration 
+# Load data into Seurat
+
+```{r seurat}
+seurat <- as.list(NULL)
+for(i in 1:nrow(samples)) {
+  out <-  readRDS(paste0("SoupX_files/",samples$SampleName[i], "_corrected.rds"))
+  seurat[[as.vector(samples$SampleName[i])]] <- CreateSeuratObject(out)
+  seurat[[i]]$Sample <- samples$SampleName[i]
+  seurat[[i]]$Condition <- samples$Condition[i]
+  seurat[[i]]$Genotype <- samples$Genotype[i]
+}
+```
+
+# Add percent.mt, percent.rib data
+
+```{r percent_mt_rib}
+p <- NULL
+for(i in 1:nrow(samples)) {
+  seurat[[i]][["percent.mt"]] <- PercentageFeatureSet(seurat[[i]], pattern = "MT-")
+  seurat[[i]][["percent.rib"]] <- PercentageFeatureSet(seurat[[i]], pattern = "RPL|RPS")
+  p[[i]] <- VlnPlot(seurat[[i]], features = c("nFeature_RNA","nCount_RNA","percent.mt","percent.rib"), ncol = 4, pt.size = 0.1)
+}
+
+saveRDS(seurat, "seurat_preSCT.rds")
+saveRDS(p, "VlnPlots_QC.rds")
+```
+
+# SCTransform sample data separately
+
+```{r transformation}
+all.genes <- rownames(seurat[[1]])
+seurat_transformed <- as.list(NULL)
+for(i in 1:nrow(samples)) {
+  seurat_transformed[[i]] <- NormalizeData(seurat[[i]], normalization.method = "LogNormalize", scale.factor = 10000, assay = "RNA")
+  seurat_transformed[[i]] <- ScaleData(seurat_transformed[[i]], features = all.genes, assay = "RNA")
+  seurat_transformed[[i]] <- SCTransform(seurat_transformed[[i]],verbose = TRUE, return.only.var.genes = TRUE,assay = "RNA", n_genes = NULL, variable.features.n = NULL)
+}
+
+saveRDS(seurat_transformed, "seurat_SCTransfrom.rds")
+```
+
+# Integrate data
+
+```{r integration}
+seurat_transformed <- readRDS("seurat_SCTransfrom.rds")
+gc()
+all.genes <- rownames(seurat[[1]])
+options(future.globals.maxSize = 100 * 1024^3)
+seurat_features <- SelectIntegrationFeatures(object.list = seurat_transformed, nfeatures = 20000, fvf.nfeatures = 20000) #originally 10000 features
+seurat_features <- seurat_features[substr(seurat_features,1,3) != "MT-" &
+                                                      substr(seurat_features,1,3) != "RPL" &
+                                                      substr(seurat_features,1,3) != "RPS"]
+seurat_integrated <- PrepSCTIntegration(object.list = seurat_transformed, anchor.features = seurat_features, verbose = TRUE)
+seurat_Anchor <- FindIntegrationAnchors(object.list = seurat_integrated, normalization.method = "SCT", 
+    anchor.features = seurat_features, verbose = TRUE, dims = 1:30, max.features = 500, n.trees = 50) #originally comparing all with all
+seurat_integrated <- IntegrateData(anchorset = seurat_Anchor, normalization.method = "SCT", verbose = TRUE, dims = 1:30)
+
+# seurat_Anchor <- readRDS("seurat_Anchor.rds")
+# seurat_integrated <- readRDS("seurat_integrated.rds")
+# seurat_features <- readRDS("seurat_features.rds")
+
+saveRDS(seurat_Anchor,"seurat_Anchor.rds")
+saveRDS(seurat_features, "seurat_features.rds")
+saveRDS(seurat_integrated, "seurat_integrated.rds")
+
+#saveRDS(seurat_integrated, "seurat_integrated_ref3.rds")
+rm(seurat_Anchor, seurat_features, seurat_transformed)
+```
+
+# Downstrem analysis
+
+```{r downstream}
+seurat_integrated <- readRDS("seurat_integrated.rds")
+memory.limit(size = 60000) 
+
+multiplot(VlnPlot(seurat_integrated, features = c("nCount_RNA"), pt.size = 0) + 
+            geom_hline(yintercept = 2500),
+                       VlnPlot(seurat_integrated, features = c("nFeature_RNA"), pt.size = 0) +
+            geom_hline(yintercept = 1500),
+                       VlnPlot(seurat_integrated, features = c("percent.mt"), pt.size = 0) +
+            geom_hline(yintercept = 10),
+                       VlnPlot(seurat_integrated, features = c("percent.rib"), pt.size = 0),
+                       cols = 4)
+seurat_filtered <- subset(seurat_integrated, subset = nFeature_RNA > 1500 & nCount_RNA > 2500 & percent.mt < 10)
+```
+
+```{r}
+DefaultAssay(seurat_filtered) <- "RNA"
+all.genes <- rownames(seurat_filtered)
+seurat_filtered <- NormalizeData(seurat_filtered, normalization.method = "LogNormalize", scale.factor = 10000, assay = "RNA")
+seurat_filtered <- ScaleData(seurat_filtered, features = all.genes, assay = "RNA")
+
+# creates SCT assay, suitable for visualization, integration, but not for DEA
+seurat_filtered <- SCTransform(seurat_filtered,verbose = TRUE, return.only.var.genes = FALSE, assay = "RNA")
+saveRDS(seurat_filtered, "seurat_SCT.rds")
+```
+
+```{r}
+DefaultAssay(seurat_filtered) <- "SCT"
+seurat_filtered <- RunPCA(seurat_filtered, npcs = 50, verbose = FALSE, features = all.genes)
+ElbowPlot(seurat_filtered, ndims = 50)
+```
+
+```{r}
+seurat_filtered <- RunUMAP(seurat_filtered, reduction = "pca", dims = 1:30, verbose = FALSE)
+seurat_filtered <- FindNeighbors(seurat_filtered, reduction = "pca", dims = 1:30, verbose = FALSE)
+seurat_filtered <- FindClusters(seurat_filtered, resolution = 0.5, verbose = FALSE)
+
+DimPlot(seurat_filtered, reduction = "umap", label = TRUE)
+DimPlot(seurat_filtered, reduction = "umap", label = TRUE, split.by = "Sample")
+
+saveRDS(seurat_filtered, "seurat_integrated_UMAP.rds")
+```
+
+```{r annot}
+seurat_filtered <- readRDS("seurat_integrated_UMAP.rds")
+
+features_test <- c("SOX9","NFIB",      # ASTRO
+                   "GFAP","SERPINA3N","VIM",                      # Reactive ASTRO
+                   "PECAM1","PDGFRB","FLT1",                # Endothelial/vascular
+                   "SLC17A6","SLC17A7","NGN2",                     # Glutamaergic
+                   "GAD1","GAD2","DLX2","ASCL1",                    # GABAergic
+                   "NURR1","LMX1A",
+                   "NKX2.2","FEV","GATA2","LMX1B",   #Serotogenic
+                   "LHX3","ISL1",                #Motor neurons
+                   "NANOG","POU5F1","SOX2", #iPSC
+                   "FOXG1","PAX6","SOX1", #Neuro epithelial
+                   "MAP2","SYP","TH" #Neuronal
+                   )
+
+
+features_test <- c("SOX9","NFIB",      # ASTRO
+                   "GFAP","VIM",                      # Reactive ASTRO
+                   "FLT1",                # Endothelial/vascular
+                   "SLC17A6","ASCL1","ISL1",
+                   "MAP2","SYP","TH" #Neuronal
+                   )   
+
+features_test <- c("SOX9","NFIB",                     # ASTRO
+                   "GFAP","VIM",                      # Reactive ASTRO
+                   "FLT1",                            # Endothelial/vascular
+                   "SLC17A6","ASCL1","ISL1",
+                   "MAP2","SYP","TH","DCX","STMN1",   # Neuronal
+                   "CCND2","SOX4",   
+                   "MGP",
+                   "PDGFRA","VCAN","CD74"
+                   )
+
+features_test <- c("EPCAM","CDH1","CLDN7",            # reprogrammed iPSCs
+                   "SOX9","NFIB",                     # ASTRO reprogramming
+                   "NUSAP1", "DTYMK",
+                   "CD44","GJA1","S100B","GFAP","VIM",     # mature ASTRO
+                   "SLC17A6","MAP2","SYP","DCX","STMN1",   # Neurons
+                   "MALAT1","percent.mt"
+                   )
+
+FeaturePlot(seurat_filtered, features = features_test, min.cutoff = "q10", max.cutoff = "q90", ncol = 4, cols = c("gray","red"))
+DotPlot(seurat_filtered, features = features_test) + theme(axis.text.x=element_text(angle=90, hjust = 1, vjust = 0.5))
+DimPlot(seurat_filtered, label=T)
+
+seurat_filtered <- FindNeighbors(seurat_filtered, reduction = "pca", dims = 1:30, verbose = FALSE, graph.name = "sct_pca")
+
+for (i in 0:10) {
+  resol = i/10
+  seurat_filtered <- FindClusters(seurat_filtered, resolution = resol, graph.name = "sct_pca")
+}
+
+clustree(seurat_filtered, prefix = "sct_pca_res.")
+
+DimPlot(seurat_filtered, reduction = "umap", label = TRUE, group.by = "sct_pca_res.0.4" )
+DotPlot(seurat_filtered, features = features_test, group.by = "sct_pca_res.0.4") +
+  theme(axis.text.x=element_text(angle=90, hjust = 1, vjust = 0.5))
+
+saveRDS(seurat_filtered, "seurat_subset_UMAP.rds")
+```
+
+```{r annot}
+seurat_filtered$cell_type <- seurat_filtered$sct_pca_res.0.4
+Idents(seurat_filtered) <- seurat_filtered$cell_type
+seurat_filtered <- RenameIdents(seurat_filtered,
+                                  '0' = "iN",
+                                  '1' = "immature iA",
+                                  '2' = "iPSC",
+                                  '3' = "undef_1",
+                                  '4' = "iA",
+                                  '5' = "Malat1 high",
+                                  '6' = "iN",
+                                  '7' = "undef_2",
+                                  '8' = "iPSC mt high",
+                                  '9' = "immature iA NUSAP1+")
+
+pdf("annotations.pdf", width = 15)
+#FeaturePlot(seurat_integrated, features = features_test, min.cutoff = "q10", max.cutoff = "q90", ncol = 4, cols = c("gray","red"))
+DotPlot(seurat_filtered, features = features_test) + theme(axis.text.x=element_text(angle=90, hjust = 1, vjust = 0.5))
+DimPlot(seurat_filtered, reduction = "umap", label = TRUE)
+DimPlot(seurat_filtered, reduction = "umap", label = TRUE, split.by = "Sample", cols = myCol, pt.size = 1)
+dittoBarPlot(seurat_filtered, var = seurat_filtered@active.ident, group.by = "Sample", color.panel = myCol, retain.factor.levels = TRUE)
+dev.off()
+
+myCol <- brewer.pal(9,"Set1")
+
+saveRDS(seurat_filtered, "seurat_annotated.rds")
+```
+
+```{r markers}
+
+markers <- FindAllMarkers(seurat_filtered, min.pct = 0.8, only.pos = TRUE, verbose = TRUE, assay = "RNA")
+markers <- markers[markers$avg_log2FC > 1 & markers$p_val_adj < 0.01, ]
+saveRDS(markers,"markers.rds")
+write.csv(markers,"markers.csv")
+#datatable(markers %>% group_by(cluster) %>% top_n(n = 15, wt = avg_log2FC))
+```
+
+```{r}
+memory.limit(size = 60000)
+seurat_annotated <- readRDS("seurat_annotated.rds")
+counts <- GetAssayData(seurat_annotated, assay = "RNA")
+counts <- counts[-grep("^MT-", rownames(counts)),]
+counts <- counts[-grep("^RPL", rownames(counts)),]
+counts <- counts[-grep("^RPS", rownames(counts)),]
+seurat_mt_rib <- subset(seurat_annotated, features = rownames(counts))
+
+DefaultAssay(seurat_mt_rib) <- "RNA"
+all.genes <- rownames(seurat_mt_rib)
+seurat_mt_rib <- NormalizeData(seurat_mt_rib, normalization.method = "LogNormalize", scale.factor = 10000, assay = "RNA")
+seurat_mt_rib <- ScaleData(seurat_mt_rib, features = all.genes, assay = "RNA")
+
+# creates SCT assay, suitable for visualization, integration, but not for DEA
+seurat_mt_rib <- SCTransform(seurat_mt_rib,verbose = TRUE, return.only.var.genes = FALSE, assay = "RNA")
+
+DefaultAssay(seurat_mt_rib) <- "SCT"
+seurat_mt_rib <- RunPCA(seurat_mt_rib, npcs = 50, verbose = FALSE, features = all.genes)
+ElbowPlot(seurat_mt_rib, ndims = 50)
+
+seurat_mt_rib <- RunUMAP(seurat_mt_rib, reduction = "pca", dims = 1:20, verbose = FALSE, seed.use = 1)
+seurat_mt_rib <- FindNeighbors(seurat_mt_rib, reduction = "pca", dims = 1:20, verbose = FALSE, graph.name = "sct_pca")
+
+for (i in 0:10) {
+  resol = i/10
+  seurat_mt_rib <- FindClusters(seurat_mt_rib, resolution = resol, graph.name = "sct_pca")
+}
+
+clustree(seurat_mt_rib, prefix = "sct_pca_res.")
+
+DimPlot(seurat_mt_rib, reduction = "umap", label = TRUE, group.by = "sct_pca_res.0.1" )
+DimPlot(seurat_mt_rib, reduction = "umap", label = TRUE, split.by = "Sample")
+
+saveRDS(seurat_mt_rib, "seurat_mt_rib.rds")
+```
+
+
+
+
+# Subset to cell types:
+```{r subset}
+seurat_filtered <- readRDS("seurat_annotated.rds")
+
+celltypes <- levels(seurat_filtered)
+```
+
+```{r subsetI}
+seurat_filtered$cell_type <- Idents(seurat_filtered)
+
+# subset to iPSC+iA
+subsets <- subset(seurat_filtered, subset = cell_type %in% c("iPSC","iPSC mt high","immature iA","immature iA NUSAP1+","undef_1","iA","undef_2","Malat1 high")) # iA/iPSC excluding neurons
+# sct_pca_res.0.3 != c("4","7") - cluster names from iA/iPSC normalized, scaled and SCTransformed subset!
+subsets <- subset(subsets, subset = sct_pca_res.0.3 != c("4")) # remove mt and MALAT1 high clusters
+subsets <- subset(subsets, subset = sct_pca_res.0.3 != c("7")) # remove mt and MALAT1 high clusters
+
+# subset to neurons
+subsets <- subset(seurat_filtered, subset = cell_type == "iN")
+```
+--> normalized, scaled, SCTransformed data forwarded to Pavel for additional filtering
+seurat_iPSC_iA_filtered --> subset to iPSC and iA
+
+```{r subsetI.I}
+#220704 remove mt/rib genes and continue with this data further
+seurat_filtered <- readRDS("iN/seurat_iNs_filtered.rds")
+seurat_filtered <- readRDS("iPSC_iA/seurat_iA_SCT.rds")
+seurat_filtered <- readRDS("iPSC_iA/seurat_iPSC_SCT.rds")
+Idents(seurat_filtered) <- seurat_filtered$cell_type_2
+
+# remove mt/rib genes from RNA assay
+counts <- GetAssayData(seurat_filtered, assay = "RNA")
+counts <- counts[-grep("^MT-", rownames(counts)),]
+counts <- counts[-grep("^RPL", rownames(counts)),]
+counts <- counts[-grep("^RPS", rownames(counts)),]
+subsets <- subset(seurat_filtered, features = rownames(counts))
+```
+
+```{r}
+# normalization, PCA - 210914 normalize and scale data added
+DefaultAssay(subsets) <- "RNA"
+all.genes <- rownames(subsets)
+subsets <- NormalizeData(subsets, normalization.method = "LogNormalize", scale.factor = 10000, assay = "RNA")
+subsets <- ScaleData(subsets, features = all.genes, assay = "RNA")
+subsets <- SCTransform(subsets, verbose = TRUE, return.only.var.genes = FALSE, assay = "RNA", n_genes = NULL, variable.features.n = NULL)
+```
+
+```{r}
+subsets <- RunPCA(subsets, assay = "SCT", npcs = 50, verbose = FALSE, features = all.genes, reduction.name = "pca")
+ElbowPlot(subsets, ndims = 50)
+```
+
+```{r subsetII}
+dimnumb <- 20 #15-iPSC 
+
+subsets <- RunUMAP(subsets, reduction = "pca", dims = 1:dimnumb, reduction.name = "umap", verbose = FALSE)
+subsets <- FindNeighbors(subsets, reduction = "pca", k.param = 20, dims = 1:dimnumb, graph.name = "sct_pca")
+
+for (i in 0:16) {
+  resol = i/10
+  subsets <- FindClusters(subsets, resolution = resol, graph.name = "sct_pca")
+}
+
+clustree(subsets, prefix = "sct_pca_res.")
+```
+
+```{r subsetIII}
+resol <- 0.2 # iPSC-0.3
+groupby <- paste0("sct_pca_res.", resol)
+DimPlot(subsets, reduction = "umap", pt.size = 0.4, group.by = groupby)
+DimPlot(subsets, reduction = "umap", pt.size = 0.4, group.by = "Sample")
+dittoBarPlot(subsets, var = groupby, group.by = "Sample", retain.factor.levels = T) #, color.panel = c("red","green","blue"))
+```
+
+```{r}
+markers <- FindAllMarkers(subsets, only.pos = TRUE, min.pct = 0.1, logfc.threshold = 0.25, 
+                          test.use = "wilcox", features = all.genes,
+                          verbose = TRUE, assay = "RNA", group.by = groupby)
+markers <- markers[markers$avg_log2FC > 0.65 & markers$p_val_adj < 0.05,]
+#write.csv(markers, "iN/markers_iN_filtered_mt_rib.csv")
+write.csv(markers, "iPSC_iA/markers_iPSC_filtered_mt_rib.csv")
+write.csv(markers, "markers_merged_filtered_mt_rib_res07.csv")
+```
+
+Cell cycle scoring.
+```{r}
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+
+subsets <- CellCycleScoring(subsets, s.features = s.genes, g2m.features = g2m.genes, set.ident = FALSE)
+
+#pdf("iN/cell_cycle_mt_rib.pdf")
+pdf("iPSC_iA/iA_cell_cycle_mt_rib.pdf")
+DimPlot(subsets, reduction = "umap", label = FALSE, split.by = "Phase", group.by = groupby)
+dittoBarPlot(subsets, var = "Phase", group.by = "Sample", color.panel = c("red","green","blue"))
+dev.off()
+
+saveRDS(subsets, "iPSC_iA/seurat_iPSC_filtered_mt_rib.rds")
+#saveRDS(subsets, "iPSC_iA/seurat_iA_filtered_mt_rib.rds")
+#saveRDS(subsets, "iN/seurat_iNs_filtered_mt_rib.rds")
+```
+
+Neurons:
+```{r}
+immature_neurons <- c("ASCL1","DCX","TUBB3","STMN1","VIM","NES")
+mature_neurons <- c("RBFOX3","MAP2","NEFM","NEFH","SYP","DLG4","SLC17A6")
+
+DotPlot(subsets, features = c(immature_neurons,mature_neurons), group.by = groupby) + theme(axis.text.x=element_text(angle=90, hjust = 1, vjust = 0.5))
+
+DotPlot(subsets, features = c("NES","DCX","SLC17A6","percent.mt","MALAT1","S100A10","ANXA2"), group.by = groupby) + theme(axis.text.x=element_text(angle=90, hjust = 1, vjust = 0.5))
+FeaturePlot(subsets, features = immature_neurons, min.cutoff = "q70",max.cutoff = "q90")
+FeaturePlot(subsets, features = mature_neurons, min.cutoff = "q70",max.cutoff = "q90")
+
+# Idents(subsets) <- subsets$sct_pca_res.0.2
+# levels(subsets)
+# levels(subsets) <- c("1","0","2")
+```
+
+iPSC+iA:
+```{r}
+immature_neurons <- c("DCX","STMN1","VIM")
+reprogrammed_iPSCs <- c("EPCAM","CDH1","CLDN7")
+iA_reprogramming <- c("SOX9","NFIB")
+immature_iA <- c("DTYMK") #"NUSAP1"
+mature_iA <- c("CD44","GJA1","S100B","GFAP") #"VIM"
+
+ASTRO_1 <- c("HSPB6","ITGA7")
+ASTRO_2 <- c("GFAP","S100B")
+ASTRO_3 <- c("COL1A1","COL3A1","COL1A2")
+#ASTRO_4 <- c("EPCAM","CDH1")
+cell_cycle <- c("TK1","NUSAP1","MKI67")
+
+DotPlot(subsets, features = c(reprogrammed_iPSCs,iA_reprogramming,immature_iA,mature_iA,"MALAT1","percent.mt", immature_neurons), group.by = groupby) + theme(axis.text.x=element_text(angle=90, hjust = 1, vjust = 0.5))
+DotPlot(subsets, features = c(ASTRO_1,ASTRO_2,ASTRO_3,ASTRO_4, cell_cycle)) + theme(axis.text.x=element_text(angle=90, hjust = 1, vjust = 0.5))
+DotPlot(subsets, features = c(ASTRO_1,ASTRO_2,ASTRO_3, cell_cycle), group.by = groupby) + theme(axis.text.x=element_text(angle=90, hjust = 1, vjust = 0.5))
+```
+
+Genes in SoupX determined background:
+```{r}
+dir <- dir("SoupX_files/", pattern = "SoupChannel")
+for (i in dir){
+  sc <- readRDS(paste0("SoupX_files/",i))
+  soup.genes <- rownames(head(sc$soupProfile[order(sc$soupProfile$est, decreasing = TRUE), ], n = 20))
+  write(soup.genes,paste0("SoupX_files/soup_genes/",gsub(pattern = "_SoupChannel.rds", x = i, replacement = ""),"_soupgenes.txt"))
+}
+```
+
+Clustering after filtering, iN/iPSC_iA, SCT, PCA, markers again, verify previous clusters:
+```{r}
+subsets <- SetIdent(subsets, value = subsets@meta.data[["sct_pca_res.0.4"]])
+subsets <- RenameIdents(subsets, "0" = "NEURO_1",
+                                 "1" = "NEURO_2",
+                                 "3" = "NEURO_3",
+                                 "2" = "NEURO_4",
+                                 "4" = "NEURO_5")
+subsets[["cell_type_3"]] <- subsets@active.ident
+DimPlot(subsets)
+
+subsets <- SetIdent(subsets, value = subsets@meta.data[["sct_pca_res.0.2"]])
+subsets <- RenameIdents(subsets, "0" = "ASTRO_1",
+                                 "2" = "ASTRO_2",
+                                 "3" = "ASTRO_3",
+                                 "1" = "ASTRO_4")
+subsets[["cell_type_4"]] <- subsets@active.ident
+DimPlot(subsets)
+
+```
+
+```{r}
+prolif <- c("PCNA","MKI67","PH3","MCM2","SOX2")
+
+PNSlike1a <- c("PCDH17","S100A13","BAALC","SERPINE2","PHOX2B","RGS4")
+PNSlike1b <- c("SCG2","SLC18A3","LINC00682","SSTR2")
+PNSlike2a <- c("SOX11","HSPA4","AMFR","CDC42SE1","CTNNB1","HNRNPH1")
+PNSlike2b <- c("FGF13","NGFR","MT1F","IGFBP5","ADAM11","PIEZO2","SHOX2","POU4F1")
+
+CNSlike <- c("NNAT","CAMK2N1","GPM6A","CXXC5","ONECUT3","PCDH9","ONECUT2")
+other <- c("PTN","VIM","HMGN2","WBP5","SPARC","GNG5")
+
+apoptosis <- c("TP53","BAX","CASP6")
+FeaturePlot(seurat_iN_filtered_mt_rib, features = apoptosis)
+
+
+astro <- c("GLUL", "GLAST", "TUBA1A", "VIM", "CD44","GJA1")
+precursors.astro <- c("ARHGEF4", "TOM1L1", "MFGE8", "GPR37L1") #MFGE8 iPSC + BAX
+early.astro <- c("GLAST","NFIA","NFIB","FGFR3","ALDH1L1")
+FeaturePlot(seurat_iA, features = early.astro,min.cutoff = "q70",max.cutoff = "q90")
+```
+
+reference datasets
+```{r}
+file.name <- "reference/astro_Kelley2018.txt"
+file.name <- "reference/Zhang_2016_astro/astro_precursors.txt"
+file.name <- "reference/Zhang_2016_astro/mature_astro.txt"
+file.name <- "reference/Krawczyk_2022_astro/Krawczyk_2022_astro_maturation_UP.txt"
+file.name <- "reference/Krawczyk_2022_astro/Krawczyk_2022_astro_maturation_DOWN.txt"
+
+Rosenthal <- c("HSPB1","CRYAB","VIM","GFAP","NES","SYNM","CCND2","SQSTM1")
+other <- c("STAT3","NFKB1","LMNA","LMNC","SLC1A2","GJA1","AQP4","KCNJ10","LCN2","CXCL10")
+
+#Zhang2013 
+
+ASTRO <- c("GFAP","ALDH1L1","SLC1A3","AQP4")
+NEURO <- c("TUBB3","STMN2","SNAP25","ENO2","SYN1")
+DotPlot(seurat_iA, features = ASTRO)
+
+reference.gene.set <- as.vector(read.table(file.name, header = T)[,1])
+reference.gene.set <- reference.gene.set %>% head(50)
+so.scored <- AddModuleScore(seurat_iA, features = list(reference.gene.set), assay = "SCT", 
+                              name = "reference_score_")
+FeaturePlot(so.scored, features = "reference_score_1", min.cutoff = "q70", 
+                    max.cutoff = "q90", reduction = "umap",pt.size = 1, cols = c("#eeeeee","#FD8D3C"))
+DoHeatmap(seurat_iA,features = reference.gene.set) +
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red")
+
+VlnPlot(so.scored, features = Rosenthal, stack = T,group.by = "Sample", flip = T) + ggtitle("Rosenthal fibers genes - all astro")
+DotPlot(seurat_iA, features = Rosenthal, group.by = "Sample") + ggtitle("Rosenthal fibers genes - all astro")
+
+astro_sub <- subset(seurat_iA, idents = "ASTRO_2")
+VlnPlot(astro_sub, features = Rosenthal, stack = T,group.by = "Sample", flip = T) + ggtitle("Rosenthal fibers genes - ASTRO_2")
+DotPlot(astro_sub, features = Rosenthal, group.by = "Sample") + ggtitle("Rosenthal fibers genes - ASTRO_2")
+
+dir <- dir("reference/Sloan_2017_astro/", pattern = ".txt")
+for (i in dir){
+  file.name <- paste0("reference/Sloan_2017_astro/",i)
+  reference.gene.set <- as.vector(read.table(file.name, header = T)[,1]) 
+  so.scored <- AddModuleScore(seurat_iA, features = list(reference.gene.set), assay = "SCT", 
+                                name = "reference_score_")
+  print(FeaturePlot(so.scored, features = "reference_score_1", min.cutoff = "q70", 
+                      max.cutoff = "q90", reduction = "umap",pt.size = 1, cols = c("#eeeeee","#FD8D3C")) + ggtitle(i))
+}
+
+dir <- dir("reference/Lin_2021_iN/", pattern = ".txt")
+for (i in dir){
+  file.name <- paste0("reference/Lin_2021_iN/",i)
+  reference.gene.set <- as.vector(read.table(file.name, header = T)[,1]) 
+  so.scored <- AddModuleScore(seurat_iN, features = list(reference.gene.set), assay = "SCT", 
+                                name = "reference_score_")
+  print(FeaturePlot(so.scored, features = "reference_score_1", min.cutoff = "q70", 
+                      max.cutoff = "q90", reduction = "umap",pt.size = 1, cols = c("#eeeeee","#FD8D3C")) + ggtitle(i))
+}
+
+DotPlot(seurat_iA, features = c("SLC1A2", "GJA1", "AQP4", "KCNJ10"), group.by = "Sample") + ggtitle("Expression of astro functional genes")
+DotPlot(astro_sub, features = c("SLC1A2", "GJA1", "AQP4", "KCNJ10"), group.by = "Sample") + ggtitle("Expression of astro functional genes - ASTRO_2")
+
+reactive.astro <- c("TSPO","C3","CHI3L1","LCN2","SERPINA3","MT1A","MT1B","THBS1","NFATC1","NTRK2","S100B","SOX9","STAT3","SLC1A3") #Escartin 2021 Tab1 mRNA
+DotPlot(seurat_iA, features = reactive.astro, group.by = "Sample") + ggtitle("Expression of astro activation genes")
+DotPlot(astro_sub, features = reactive.astro, group.by = "Sample") + ggtitle("Expression of astro activation genes - ASTRO_2")
+
+proteasome <- c("MAPK1","MAPK14","JNK","JUN")
+DotPlot(seurat_iA, features = proteasome, group.by = "Sample") + ggtitle("Expression of proteasome genes")
+DotPlot(astro_sub, features = proteasome, group.by = "Sample") + ggtitle("Expression of proteasome genes - ASTRO_2")
+
+mechano <- c("YAP","LMNA","ACTB","DST","MACF1","PLEC","LAMA","LAMB1","LAMB2","VCL")
+DotPlot(seurat_iA, features = mechano, group.by = "Sample") + ggtitle("Expression of mechanotransduction genes")
+DotPlot(astro_sub, features = mechano, group.by = "Sample") + ggtitle("Expression of mechanotransduction genes - ASTRO_2")
+
+DotPlot(seurat_iA, features = c("SLC1A2", "GJA1", "AQP4", "KCNJ10",reactive.astro,proteasome,mechano)) + ggtitle("Expression of genes in clusters") + theme(axis.text.x = element_text(angle = 90,vjust = 0.5))
+
+p<-DotPlot(seurat_iA,features = Rosenthal, group.by = "Sample") + 
+  theme(axis.text.x = element_text(angle = 90,vjust = 0.5)) +
+  ggtitle("Rosenthal fibers genes - all astrocytes")
+ggsave(plot = p, filename = "iPSC_iA/220510_figs/Rosenthal_alliA.png",device = "png", width = 6, height = 4, bg = "white")
+```
+
+Kanton reference
+```{r}
+table <- read.csv("reference/Kanton_2019_organoids/Supplementary_Table_4.csv", header = T, row.names = 1)
+
+for (cluster in levels(as.factor(table$cluster))){
+  genes <- rownames(table[table$cluster == cluster,])
+  clus.name <- gsub(" ","_",cluster)
+  clus.name <- gsub("/","_",clus.name)
+  write(genes,paste0("reference/Kanton_2019_organoids/",clus.name,"_markers.txt"))
+}
+
+dir <- dir("reference/Kanton_2019_organoids/", pattern = ".txt")
+for (i in dir){
+  file.name <- paste0("reference/Kanton_2019_organoids/",i)
+  reference.gene.set <- as.vector(read.table(file.name, header = F)[,1])
+  reference.gene.set <- reference.gene.set %>% head(50)
+  print(length(reference.gene.set))
+  so.scored <- AddModuleScore(seurat_iN, features = list(reference.gene.set), assay = "SCT", 
+                                name = "reference_score_")
+  print(FeaturePlot(so.scored, features = "reference_score_1", min.cutoff = "q70", 
+                      max.cutoff = "q90", reduction = "umap",pt.size = 1, cols = c("#eeeeee","#FD8D3C")) + ggtitle(i))
+}
+
+reference.gene.set <- as.vector(read.table("reference/Kanton_2019_organoids/heatmap_suppl_fig2.txt", header = F)[,1])
+DoHeatmap(seurat_iN, features = reference.gene.set)
+```
+
+Heatmap from average
+```{r}
+reference.gene.set <- as.vector(read.table("reference/Zhang_2013_iN/iN_heatmap.txt", header = F)[,1])
+reference.gene.set <- as.vector(read.table("reference/Kanton_2019_organoids/heatmap_suppl_fig2.txt", header = F)[,1])
+reference.gene.set <- as.vector(read.table("reference/Lin_2021_iN/dotplot.txt", header = F)[,1])
+reference.gene.set <- c("DCN","COL5A1","MAP2","NCAM1","PRPH","PHOX2B","POU4F1","GPM6A") # Lin 2021 small set
+reference.gene.set <- c("NGFR","B3GAT1","TFAP2A","SOX10","SNAI1","SNAI2","SOX9","POU4F1","PRPH","HRH1","TRPV1","TRPA1","MRGPRX1","IL31RA","ISL1","TUBB3")
+
+library(ComplexHeatmap)
+seurat_iN <- readRDS("iN/seurat_iN_filtered_mt_rib.rds")
+
+#samples <- c("Ctrl_wt", "Ctrl_w_a", "Ctrl_AxD", "OGD_wt", "OGD_w_a", "OGD_AxD")
+samples <- levels(seurat_iN)
+
+list.counts <- list()
+for (i in 1:length(samples)) {            # 6 samples
+    subset.data <- subset(seurat_iN, subset = cell_type_3 == samples[i]) # subset to cells from 1 sample only
+    counts <- GetAssayData(subset.data, assay = "RNA", slot = "scale.data")  # normalized and scaled counts from RNA data slot
+    counts <- as.data.frame(counts)
+    counts$rowmeans <- rowMeans(counts) # sum gene counts across cells
+    bulk.counts <- data.frame(gene = rownames(counts), counts = counts$rowmeans)
+    list.counts[[i]] <- bulk.counts
+    names(list.counts)[[i]] <- samples[i]
+}
+   
+bulk.df <- purrr::reduce(list.counts,full_join, by = "gene")
+rownames(bulk.df) <- bulk.df[,1]
+bulk.df <- bulk.df[,-1]
+colnames(bulk.df) <- names(list.counts)
+
+saveRDS(bulk.df, "iN/pseudobulk_iN.rds")
+
+bulk.df <- readRDS("iN/pseudobulk_iN.rds")
+mat <- as.matrix(bulk.df[rownames(bulk.df) %in% reference.gene.set,])
+
+png("iN/heatmap_Lin2021.png",width=4,height=9,units = "in",res = 1200)
+  draw(Heatmap(mat, cluster_rows = F, cluster_columns = F, row_order = reference.gene.set))
+dev.off()
+```
+
+Heatmap from average astro
+```{r}
+reference.gene.set <- c("HSPB1","CRYAB","VIM","GFAP","NES","SYNM","CCND2","SQSTM1") #Rosenthal fibers
+reference.gene.set <- c("TSPO","C3","CHI3L1","LCN2","SERPINA3","MT1A","MT1B","THBS1","NFATC1","NTRK2","S100B","SOX9","STAT3","SLC1A3") #Escartin 2021 Tab1 mRNA
+seurat_iA <- readRDS("iPSC_iA/seurat_iA_filtered_mt_rib.rds")
+
+samples <- c("Ctrl_wt", "Ctrl_w_a", "Ctrl_AxD", "OGD_wt", "OGD_w_a", "OGD_AxD")
+#samples <- levels(seurat_iN)
+
+list.counts <- list()
+for (i in 1:length(samples)) {            # 6 samples
+    subset.data <- subset(seurat_iA, subset = Sample == samples[i]) # subset to cells from 1 sample only
+    counts <- GetAssayData(subset.data, assay = "RNA", slot = "scale.data")  # normalized and scaled counts from RNA data slot
+    counts <- as.data.frame(counts)
+    counts$rowmeans <- rowMeans(counts) # sum gene counts across cells
+    bulk.counts <- data.frame(gene = rownames(counts), counts = counts$rowmeans)
+    list.counts[[i]] <- bulk.counts
+    names(list.counts)[[i]] <- samples[i]
+}
+   
+bulk.df <- purrr::reduce(list.counts,full_join, by = "gene")
+rownames(bulk.df) <- bulk.df[,1]
+bulk.df <- bulk.df[,-1]
+colnames(bulk.df) <- names(list.counts)
+
+saveRDS(bulk.df, "iPSC_iA/pseudobulk_iA.rds")
+
+mat <- as.matrix(bulk.df[rownames(bulk.df) %in% reference.gene.set,])
+
+png("iPSC_iA/220510_figs/heatmap_Rosenthal_alliA.png",width=5,height=5,units = "in",res = 1200)
+  draw(Heatmap(mat,
+               column_title = "Rosenthal fibers genes - all astrocytes pseudobulk",
+               column_title_gp = gpar(fontsize = 12),
+               heatmap_legend_param = list(title = expression("Log"[2]*"FC scale"))))
+dev.off()
+```
+
+Merge datasets
+```{r}
+memory.limit(size = 60000)
+
+seurat_iN <- readRDS("iN/seurat_iN_filtered_mt_rib.rds")
+seurat_iA <- readRDS("iPSC_iA/seurat_iA_filtered_mt_rib.rds")
+seurat_iPSC <- readRDS("iPSC_iA/seurat_iPSC_filtered_mt_rib.rds")
+
+subsets <- merge(x=seurat_iN, y=c(seurat_iA,seurat_iPSC))
+
+iA.meta <- seurat_iA@active.ident
+iN.meta <- seurat_iN@active.ident
+iPSC.meta <- seurat_iPSC@active.ident
+meta <- c(iA.meta,iN.meta,iPSC.meta)
+subsets$cell_type_joined <- meta
+
+# norm, scale, PCA, UMAP,..
+
+cols <- brewer.pal(12,"Paired")
+DimPlot(subsets, group.by = "cell_type_joined", pt.size = 1, cols = cols)
+
+DimPlot(subsets, group.by = "sct_pca_res.0.7", pt.size = 1, cols = cols)
+Idents(subsets) <- subsets$sct_pca_res.0.7
+subsets <- RenameIdents(subsets,
+             "8" = "1",
+             "9" = "2",
+             "6" = "3",
+             "1" = "4",
+             "0" = "5",
+             "5" = "6",
+             "3" = "7",
+             "7" = "8",
+             "2" = "9",
+             "4" = "10",
+             "10" = "11")
+subsets$cell_type_joined_new <- subsets@active.ident
+
+Idents(subsets) <- subsets$cell_type_joined
+
+saveRDS(subsets, "seurat_all_merged_filtered_mt_rib.rds")
+
+NEURO_1 <- c("FTL","SERF2","IGFBP2","VIM")
+NEURO_2 <- c("SCG2","NNAT","PCSK1","SYT4","BDNF","STC1")
+NEURO_3 <- c("PTH2","UCN","SCG5","TRH")
+NEURO_4 <- c("PRPH","ISL1","PHOX2B","PCP4","IFI16","LINC00682")
+FeaturePlot(subsets, features = NEURO_1, min.cutoff = "q10",max.cutoff = "q90")
+
+
+
+
+p <- DimPlot(subsets, pt.size = 0.7, cols = cols, label = T) + NoLegend() + ggtitle("New clustering - resol. 0.7")
+q <- DimPlot(subsets, group.by = "cell_type_joined",pt.size = 0.7, cols = cols, label = T, repel = T) + ggtitle("Old clustering on merged data") 
+
+ggsave(filename = "merged_clustering07.png", plot = p, device = "png", height = 5, width = 6)
+ggsave(filename = "merged_clusteringold.png", plot = q, device = "png", height = 5, width = 7)
+
+markers.filter <- markers[markers$avg_log2FC > 1 & markers$p_val_adj < 0.05 & 
+                            markers$pct.1 > 0.4 & (markers$pct.1 - markers$pct.2) > 0.2,]
+markers.filter <- markers.filter %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC)
+
+samples <- levels(subsets)
+
+list.counts <- list()
+for (i in 1:length(samples)) {            # 6 samples
+    subset.data <- subset(subsets, idents = samples[i]) # subset to cells from 1 sample only
+    counts <- GetAssayData(subset.data, assay = "RNA", slot = "scale.data")  # normalized and scaled counts from RNA data slot
+    counts <- as.data.frame(counts)
+    counts$rowmeans <- rowMeans(counts) # sum gene counts across cells
+    bulk.counts <- data.frame(gene = rownames(counts), counts = counts$rowmeans)
+    list.counts[[i]] <- bulk.counts
+    names(list.counts)[[i]] <- samples[i]
+}
+   
+bulk.df <- purrr::reduce(list.counts,full_join, by = "gene")
+rownames(bulk.df) <- bulk.df[,1]
+bulk.df <- bulk.df[,-1]
+colnames(bulk.df) <- names(list.counts)
+
+saveRDS(bulk.df, "pseudobulk_merged_new.rds")
+
+reference.gene.set <- markers.filter$gene
+mat <- as.matrix(bulk.df[rownames(bulk.df) %in% reference.gene.set,])
+
+png("heatmap_merged_filtered_res07.png",width=5,height=14,units = "in",res = 1200)
+  draw(Heatmap(mat, cluster_rows = F, row_order = unique(reference.gene.set), 
+               column_order = colnames(mat), column_names_rot = 0, column_names_centered = T))
+dev.off()
+```

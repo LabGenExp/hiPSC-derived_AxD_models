@@ -1,0 +1,569 @@
+---
+title: "DEA"
+author: "Zuzana"
+date: "2/25/2022"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+DEtests <- function(
+  seuratObject,
+  conditions,
+  test = "t",
+  #treshold = 0.05,
+  verbose = TRUE,
+  ...
+) {
+  DefaultAssay(seuratObject) <- "RNA"
+  print(seuratObject)
+  dfs <- list()
+  for (i in conditions){
+    DEGs <- FindMarkers(seuratObject, ident.1 = i[2], ident.2 = i[1], test.use = test, logfc.threshold = 0, min.pct = 0.1)
+    DEGs <- DEGs[order(DEGs$avg_log2FC, decreasing = FALSE),]
+    dfs[[paste0(i[1],"-",i[2])]] <- DEGs
+  }
+  return(dfs)
+}
+
+DEtests2 <- function(
+  seuratObject,
+  conditions,
+  test = "t",
+  #treshold = 0.05,
+  verbose = TRUE,
+  gene.list,
+  ...
+) {
+  DefaultAssay(seuratObject) <- "RNA"
+  print(seuratObject)
+  dfs <- list()
+  for (i in conditions){
+    DEGs <- FindMarkers(seuratObject, ident.1 = i[2], ident.2 = i[1], test.use = test, 
+                        logfc.threshold = 0, min.pct = 0,
+                        features = gene.list)
+    DEGs <- DEGs[order(DEGs$avg_log2FC, decreasing = FALSE),]
+    dfs[[paste0(i[1],"-",i[2])]] <- DEGs
+  }
+  return(dfs)
+}
+```
+
+Import R libaries.
+```{r include=FALSE}
+library(Seurat)
+library(scater)
+library(loomR)
+library(DESeq2)
+library(sctransform)
+library(MAST)
+library(UpSetR)
+library(reshape2)
+library(gridExtra)
+library(grid)
+library(ggplot2)
+library(xlsx)
+library(EnhancedVolcano)
+options(java.parameters = c("-XX:+UseConcMarkSweepGC", "-Xmx8192m"))
+library(ggrepel)
+library(org.Hs.eg.db)
+library(clusterProfiler)
+library(xlsx)
+library(enrichplot)
+library(dplyr)
+library(ggsignif)
+```
+
+```{r}
+memory.limit(60000)
+seurat_iPSC_iA_filtered_new <- readRDS("iPSC_iA/seurat_iPSC_iA_filtered_new.rds")
+seurat_iPSC <- subset(seurat_iPSC_iA_filtered_new, ident = "ASTRO_4")
+seurat_iA <- subset(seurat_iPSC_iA_filtered_new, ident = c("ASTRO_1","ASTRO_2","ASTRO_3"))
+rm(seurat_iPSC_iA_filtered_new)
+
+seurat <- list(seurat_iPSC,seurat_iA)
+names(seurat) <- c("seurat_iPSC","seurat_iA")
+rm(seurat_iPSC,seurat_iA)
+gc()
+
+for (i in 1:length(seurat)){
+  so <- seurat[[i]]
+  DefaultAssay(so) <- "RNA"
+  all.genes <- rownames(so)
+  so <- NormalizeData(so, normalization.method = "LogNormalize", scale.factor = 10000, assay = "RNA")
+  so <- ScaleData(so, features = all.genes, assay = "RNA")
+
+  # creates SCT assay, suitable for visualization, integration, but not for DEA
+  so <- SCTransform(so,verbose = TRUE, return.only.var.genes = FALSE, assay = "RNA")
+  saveRDS(so, paste0(names(seurat[i]),"_SCT.rds"))
+}
+```
+
+
+Differential expression testing for each object. RNA assay, normalized and scaled data.
+```{r}
+seurat_files <- c("iPSC","iA") #"iN",
+
+for (celltype in seurat_files){
+  # file.name <- paste0(celltype, "/seurat_", celltype, "_filtered_new.rds")
+  # file.name <- paste0(celltype, "_SCT.rds")
+  file.name <- paste0(celltype, "_filtered_mt_rib.rds")
+  
+  seurat.object <- readRDS(file.name)
+  levels(as.factor(seurat.object@meta.data[["Sample"]]))
+  #conditions <- list(list("Ctrl_wt","Ctrl_AxD"),list("Ctrl_wt","Ctrl_w_a"),
+                     # list("Ctrl_w_a","Ctrl_AxD"),list("Ctrl_wt","OGD_wt"),
+                     # list("Ctrl_AxD","OGD_AxD"),list("Ctrl_w_a","OGD_w_a"))
+  #conditions <- list(list("Ctrl_wt","OGD_wt"),list("Ctrl_AxD","OGD_AxD"),list("Ctrl_w_a","OGD_w_a"))
+  conditions <- list(list("OGD_wt","OGD_w_a"), list("OGD_wt","OGD_AxD")) #add
+  Idents(seurat.object) <- seurat.object@meta.data[["Sample"]]
+  DE_tests_name <- paste0("DE_", celltype, "_add")
+  #DE_tests_name <- paste0("DE_", celltype)
+  DE_tests <- DEtests(seurat.object, conditions)
+  saveRDS(DE_tests, paste0("iPSC_iA/DEA_mt_rib/",DE_tests_name, ".rds"))
+
+  file.xlsx <- paste0("iPSC_iA/DEA_mt_rib/",celltype, "_DEGs_add.xlsx")
+  condition_names <- names(DE_tests)
+  write.xlsx("empty", file.xlsx, sheetName = "1", append = FALSE)
+  for (condition in condition_names){
+    top.genes <- DE_tests[[condition]][DE_tests[[condition]]$p_val_adj < 0.05,]
+    top.genes <- top.genes[order(top.genes$p_val_adj),]
+    if (nrow(top.genes) == 0){
+      write.xlsx("no genes <0.05 found", file.xlsx, sheetName = condition, append = TRUE)
+    }
+    else {write.xlsx(top.genes, file.xlsx, sheetName = condition, append = TRUE)}
+  }
+  
+  #DE_tests <- readRDS(paste0("DEA_mt_rib/DE_",celltype,".rds"))
+  for (n in 1:length(DE_tests)){
+    res = DE_tests[[n]]
+    p <- EnhancedVolcano(toptable = res,
+      lab = rownames(res), 
+      x = 'avg_log2FC',
+      y = 'p_val_adj',
+      axisLabSize = 12,
+      titleLabSize = 14,
+      title = paste(celltype,condition_names[n], sep = " "),
+      pCutoff = 0.05,
+      colAlpha = 0.7,
+      subtitleLabSize = 9,
+      FCcutoff = 0.65,
+      labSize = 4,
+      pointSize = 2.0,
+      drawConnectors = TRUE,
+      legendPosition = "none") +
+        #scale_colour_manual(values = c("#C0C0C0","#C0C0C0","#C0C0C0","#BD0026")) +
+        theme(plot.subtitle = element_blank(), 
+              plot.caption = element_blank(), 
+              panel.grid.minor = element_blank(), 
+              panel.grid.major = element_blank(), 
+              plot.margin = margin(0.1,0.1,0,0, unit = "cm"))
+    ggsave(plot = p, paste0("iPSC_iA/DEA_mt_rib/",celltype,"_volcano_",condition_names[n],".png"), device = "png")
+  }
+}  
+```
+
+Scatter plot, overlaps:
+```{r}
+DE_iN <- readRDS("iN/DEA_mt_rib/DE_iN.rds")
+compare <- DE_iN[c("Ctrl_AxD-OGD_AxD", "Ctrl_w_a-OGD_w_a")]
+
+for (i in 1:length(compare)) {
+  compare[[i]][["rank"]] <- compare[[i]][["avg_log2FC"]] * (-log10(compare[[i]][["p_val_adj"]]))
+  compare[[i]][["name"]] <- rownames(compare[[i]])
+}
+
+df1 <- compare[["Ctrl_AxD-OGD_AxD"]][, c("rank", "name")]
+df1$rank1 <- df1$rank
+df1 <- df1[,-1]
+
+df2 <- compare[["Ctrl_w_a-OGD_w_a"]][, c("rank", "name")]
+df2$rank2 <- df2$rank
+df2 <- df2[,-1]
+
+df1.merged <- merge(df1,df2, by = "name" ,all = T)
+df1.merged[is.na(df1.merged)] <- 0
+
+df <- df1.merged
+
+p <- ggplot(df, aes(x=rank1,y=rank2,label=name)) + 
+  geom_point(size=3,color="grey",alpha=0.9) + 
+  geom_point(data=subset(df, abs(rank1) > 10 | abs(rank2) > 10),color="red",size=5) +
+  geom_text_repel(data=subset(df, abs(rank1) > 10 | abs(rank2) > 10)) +
+  xlab("Ctrl_AxD-OGD_AxD") + ylab("Ctrl_w_a-OGD_w_a") +
+  theme_bw() + theme(axis.text = element_text(size=12))
+ggsave(plot = p, filename = "iN/DEA_mt_rib/iN_scatter_comparison.png",device="png")
+
+###-------------------
+DE_iPSC_iA <- readRDS("iPSC_iA/DEA_mt_rib/DE_iA.rds")
+DE_iPSC_iA <- readRDS("iPSC_iA/DEA_mt_rib/DE_iPSC.rds")
+
+compare <- DE_iPSC_iA[c("Ctrl_AxD-OGD_AxD", "Ctrl_w_a-OGD_w_a")]
+#compare <- DE_iPSC_iA[c("Ctrl_wt-OGD_wt", "Ctrl_AxD-OGD_AxD")]
+
+for (i in 1:length(compare)) {
+  compare[[i]][["rank"]] <- compare[[i]][["avg_log2FC"]] * (-log10(compare[[i]][["p_val_adj"]]))
+  compare[[i]][["name"]] <- rownames(compare[[i]])
+}
+
+df1 <- compare[["Ctrl_AxD-OGD_AxD"]][, c("rank", "name")]
+df1$rank1 <- df1$rank
+df1 <- df1[,-1]
+
+df2 <- compare[["Ctrl_w_a-OGD_w_a"]][, c("rank", "name")]
+df2$rank2 <- df2$rank
+df2 <- df2[,-1]
+
+# df1 <- compare[["Ctrl_wt-OGD_wt"]][, c("rank", "name")]
+# df1$rank1 <- df1$rank
+# df1 <- df1[,-1]
+# 
+# df2 <- compare[["Ctrl_AxD-OGD_AxD"]][, c("rank", "name")]
+# df2$rank2 <- df2$rank
+# df2 <- df2[,-1]
+
+df1.merged <- merge(df1,df2, by = "name" ,all = T)
+df1.merged[is.na(df1.merged)] <- 0
+
+df <- df1.merged
+
+p <- ggplot(df, aes(x=rank1,y=rank2,label=name)) + 
+  geom_point(size=3,color="grey",alpha=0.9) + 
+  geom_point(data=subset(df, abs(rank1) > 10 | abs(rank2) > 10),color="red",size=5) +
+  geom_text_repel(data=subset(df, abs(rank1) > 10 | abs(rank2) > 10)) +
+  xlab("Ctrl_AxD-OGD_AxD") + ylab("Ctrl_w_a-OGD_w_a") +
+  theme_bw() + theme(axis.text = element_text(size=12))
+ggsave(plot = p, filename = "iPSC_iA/DEA_mt_rib/iPSC_scatter_comparison.png",device="png")
+```
+
+
+# GSEA
+Functions needed to generate gene lists for GSEA:
+```{r geneset_functions}
+subfunction1 <- function(test){
+  gene_list <- test$avg_log2FC * (-log10(test$p_val))
+  names(gene_list) <- rownames(test)
+  gene_list <- na.omit(gene_list)
+  keep <- is.finite(gene_list)
+  gene_list <- gene_list[keep]
+  gene_list <- sort(gene_list, decreasing = TRUE)
+  return(gene_list)
+}
+
+createGenelists <- function(DEtables){
+  genenames <- lapply(DEtables, function(x){subfunction1(x)})
+  return(genenames)
+}
+
+createGeneSets <- function(dir){
+  files <- list.files(path=dir, pattern="*.txt", full.names=TRUE, recursive=FALSE)
+  fnames <- lapply(files, function(x){strsplit(x, split = "/")})
+  fnames <- lapply(fnames, function(x){x[[1]][length(x[[1]])]})
+  fnames <- lapply(fnames, function(x){strsplit(x, split = ".txt")})
+  fnames <- lapply(fnames, function(x){x[[1]][1]})
+  genesets <- lapply(files, function(x){read.table(x, header = FALSE, sep = "\t")})
+  genesets <- lapply(genesets, function(x){as.character(x[,1])})
+  names(genesets) <- fnames
+  genesets <- lapply(genesets, function(x) mapIds(org.Hs.eg.db,keys=x,column="ALIAS",keytype="ENSEMBL",multiVals="first"))
+  genesets <- lapply(genesets, function(x) as.character(x))
+  genesets <- lapply(genesets, function(x) na.omit(x))
+  return(genesets)
+}
+createGeneSets2 <- function(dir){
+  files <- list.files(path=dir, pattern="*.txt", full.names=TRUE, recursive=FALSE)
+  fnames <- lapply(files, function(x){strsplit(x, split = "/")})
+  fnames <- lapply(fnames, function(x){x[[1]][length(x[[1]])]})
+  fnames <- lapply(fnames, function(x){strsplit(x, split = ".txt")})
+  fnames <- lapply(fnames, function(x){x[[1]][1]})
+  genesets <- lapply(files, function(x){read.table(x, header = FALSE, sep = "\t")})
+  genesets <- lapply(genesets, function(x){as.character(x[,1])})
+  names(genesets) <- fnames
+  return(genesets)
+}
+
+createGenesetsForClusterProfiler <-function(geneset){
+  term2genes <- c("ID","Gene")
+  term2names <- c ("ID", "Name")
+  counter <- 0
+  for (i in geneset){
+    counter <- counter +1
+    gene <- c(i)
+    name <- c(rep(names(geneset[counter]),length(gene)))
+    id <- c(rep(paste0("Custom",counter),length(gene)))
+    term2gene <- cbind(id, gene)
+    term2name <- cbind(id, name)
+    term2genes <- rbind(term2genes, term2gene)
+    term2names <- rbind(term2names, term2name)
+  }
+  rm(term2gene, term2name)
+  term2gene <- as.data.frame(term2genes)
+  term2gene <- term2gene[-1,]
+  rownames(term2gene) <- seq(1,dim(term2gene)[1], by=1)
+  rm(term2genes)
+  term2name <- as.data.frame(term2names)
+  term2name <- term2name[-1,]
+  rownames(term2name) <- seq(1,dim(term2name)[1], by=1)
+  rm(term2names)
+  return(list(term2gene,term2name))
+}
+```
+
+Load DE data from Seurat t-test:
+```{r GSEA}
+celltype_names <- c("iPSC","iA")  #"iN",
+
+for (celltype in celltype_names){
+  file.name <- paste0("iPSC_iA/DEA_mt_rib/DE_", celltype, ".rds")
+  DE.object <- readRDS(file.name)
+  
+  gene_lists <- list()
+  gene_lists <- createGenelists(DE.object) # create ranked gene list
+  
+  condition_names <- names(DE.object)
+
+  # run GSEA
+  listOfALLGOresults <- list()
+  for (l in 1:length(gene_lists)){
+    print(condition_names[l])
+    gene_list <- gene_lists[[l]]
+
+    gse <- gseGO(geneList=gene_list, 
+                ont ="ALL", 
+                keyType = "ALIAS", 
+                #nPermSimple = 10000, 
+                minGSSize = 3, 
+                maxGSSize = 800, 
+                pvalueCutoff = 1, 
+                verbose = TRUE, 
+                OrgDb = org.Hs.eg.db, 
+                pAdjustMethod = "BH",
+                by = "fgsea")
+    
+    listOfALLGOresults <- append(listOfALLGOresults, gse)
+  }
+
+  names(listOfALLGOresults) <- condition_names
+  save(listOfALLGOresults,file = paste0("iPSC_iA/GSEA_mt_rib/",celltype,"listOfAllGOresults_add.RData"))
+  
+# create xlsx files from results
+  
+  file <- paste0("iPSC_iA/GSEA_mt_rib/",celltype,"_GSEA_results_add.xlsx")
+  write.xlsx("empty", file, sheetName = "0", append = FALSE)
+  for (n in 1:length(listOfALLGOresults)){
+    if (dim(listOfALLGOresults[[n]])[1] != 0) {
+      write.xlsx(listOfALLGOresults[[n]], file, sheetName = condition_names[n], append = TRUE)
+      
+      ggsave(filename = paste0("iPSC_iA/GSEA_mt_rib/", celltype,"_",condition_names[n],".png"), 
+             plot = dotplot(listOfALLGOresults[[n]], showCategory = 15, 
+                            title = condition_names[n], split=".sign", label_format = 50) +
+               facet_grid(.~.sign),
+             device = "png", height = 7, width = 10)
+      
+      res.filter <- listOfALLGOresults[[n]][listOfALLGOresults[[n]]@result[["NES"]] > 0, asis = T]
+      if (dim(res.filter)[1] != 0){
+        p.emap <- pairwise_termsim(res.filter)
+        p <- emapplot(p.emap, showCategory = 50, cex_label_category=0.6) + 
+          theme(text = element_text(size = 10)) + 
+          labs(fill = "p.adj",title = paste("GSEA", "up", condition_names[n]))
+          ggsave(paste0("iPSC_iA/GSEA_mt_rib/",celltype,"_",condition_names[n],"_emap_UP.png"),plot = p, device = "png")
+      }
+      
+      res.filter <- listOfALLGOresults[[n]][listOfALLGOresults[[n]]@result[["NES"]] < 0, asis = T]
+      if (dim(res.filter)[1] != 0){
+        p.emap <- pairwise_termsim(res.filter)
+        p <- emapplot(p.emap, showCategory = 50, cex_label_category=0.6) + 
+          theme(text = element_text(size = 10)) + 
+          labs(fill = "p.adj",title = paste("GSEA", "down", condition_names[n]))
+          ggsave(paste0("iPSC_iA/GSEA_mt_rib/",celltype,"_",condition_names[n],"_emap_DOWN.png"),plot = p, device = "png")
+       }
+     }
+   }
+}
+```
+
+ORA
+```{r ORA}
+wd <- c("iPSC_iA","iN")
+for (w in wd){
+  setwd(w)
+
+  cell.type <- c("iPSC","iA") #,"iN"
+  for (i in cell.type){
+    background <- readRDS(paste0(w,"/seurat_",i,"_filtered_mt_rib.rds"))
+    background.genes <- rownames(background)
+    tab <- read.table(paste0("markers_",i,"_filtered_mt_rib.csv"), sep = ",", header = T, row.names = 1)
+    for (cluster in levels(as.factor(tab$cluster))) {
+      gene.list <- tab[tab$cluster == cluster,"gene"]
+      cluster.name <- gsub("/","-", cluster) 
+      
+      ego <- enrichGO(gene       = gene.list,
+                   universe     = background,
+                   keyType       = "ALIAS",
+                   OrgDb         = org.Hs.eg.db,
+                   ont           = "ALL",
+                   pAdjustMethod = "fdr",
+                   pvalueCutoff  = 0.1,
+                   qvalueCutoff  = 0.2,
+                   readable      = TRUE,
+                   minGSSize     = 3)
+      
+      d.plot <- dotplot(ego, showCategory = 10, title = paste0("ORA GO terms ", cluster.name), label_format = 50) +  
+        scale_color_viridis(direction = -1, begin = 0.2, end = 0.91) +
+        theme_minimal() +
+        theme(panel.grid.minor = element_blank(),
+              plot.title = element_text(face = "bold"),
+              axis.text.y = element_text(size = 12))
+     
+      saveRDS(ego,paste0("ORA/ORA_results_",cluster.name,".rds"))
+      ggsave(paste0("ORA/ORA_dotplot_",cluster.name,".png"), plot = d.plot, device = "png", height = 6, width = 8)
+    }
+  }
+}
+```
+
+Volcano with custom labels
+```{r}
+for (n in 1:length(DE_iN)){
+    condition_names <- names(DE_iN)
+    res = DE_iN[[n]]
+
+    sig.genes <- res[res$p_val_adj < 0.05 & abs(res$avg_log2FC) > 0.65 & rownames(res) %in% genes,]
+    
+    p <- EnhancedVolcano(toptable = res,
+      lab = rownames(res), 
+      selectLab = rownames(sig.genes),
+      x = 'avg_log2FC',
+      y = 'p_val_adj',
+      axisLabSize = 12,
+      titleLabSize = 14,
+      title = paste("iN",condition_names[n], sep = " "),
+      pCutoff = 0.05,
+      colAlpha = 0.7,
+      subtitleLabSize = 9,
+      FCcutoff = 0.65,
+      labSize = 4,
+      pointSize = 2.0,
+      drawConnectors = TRUE,
+      legendPosition = "none") +
+        #scale_colour_manual(values = c("#C0C0C0","#C0C0C0","#C0C0C0","#BD0026")) +
+        theme(plot.subtitle = element_blank(), 
+              plot.caption = element_blank(), 
+              panel.grid.minor = element_blank(), 
+              panel.grid.major = element_blank(), 
+              plot.margin = margin(0.1,0.1,0,0, unit = "cm"))
+    ggsave(plot = p, paste0("iN/DEA_mt_rib/iN_volcano_",condition_names[n],"_labs.png"), device = "png", width = 6, height = 5)
+}
+```
+
+#DE testing on ASTRO_2 only
+```{r}
+file.name <- paste0("C:/Users/Zuzana/ZUZA_DATA/Lund_AxD/RNAseq/iPSC_iA/seurat_iA_filtered_mt_rib.rds")
+seurat.object <- readRDS(file.name)
+seurat.object <- subset(seurat.object, idents = "ASTRO_2")
+
+levels(as.factor(seurat.object@meta.data[["Sample"]]))
+conditions <- list(list("Ctrl_wt","Ctrl_AxD"),list("Ctrl_wt","Ctrl_w_a"),
+                    list("Ctrl_w_a","Ctrl_AxD"),list("Ctrl_wt","OGD_wt"),
+                    list("Ctrl_AxD","OGD_AxD"),list("Ctrl_w_a","OGD_w_a"),
+                    list("OGD_wt","OGD_AxD"),list("OGD_wt","OGD_w_a"),
+                    list("OGD_w_a","OGD_AxD"))
+Idents(seurat.object) <- seurat.object@meta.data[["Sample"]]
+DE_tests_name <- "DE_ASTRO_2"
+DE_tests <- DEtests(seurat.object, conditions)
+saveRDS(DE_tests, paste0("iPSC_iA/DEA_mt_rib/",DE_tests_name, ".rds"))
+
+file.xlsx <- "iPSC_iA/DEA_mt_rib/ASTRO_2_DEGs.xlsx"
+condition_names <- names(DE_tests)
+write.xlsx("empty", file.xlsx, sheetName = "1", append = FALSE)
+for (condition in condition_names){
+  top.genes <- DE_tests[[condition]][DE_tests[[condition]]$p_val_adj < 0.05,]
+  top.genes <- top.genes[order(top.genes$p_val_adj),]
+  if (nrow(top.genes) == 0){
+    write.xlsx("no genes <0.05 found", file.xlsx, sheetName = condition, append = TRUE)
+  }
+  else {write.xlsx(top.genes, file.xlsx, sheetName = condition, append = TRUE)}
+}
+```
+
+#DE testing on specific set of genes
+```{r}
+genes <- c("GJA1","THBS1","S100B","TSPO","JUN","ACTB","LAMB2","VCL","ATP1B2")
+genes <- c("THBS2","THBS3","THBS4")
+genes <- c("GJA1","TSPO","THBS1","S100B","STAT3","DST","MACF1","LAMB1") #ASTRO_2
+genes <- c("GJA1","TSPO","THBS1","JUN","ACTB","PLEC") #ASTRO_3
+genes <- c("SHH", "PTCH1", "PTCH2", "SMO", "GLI1", "GLI2", "GLI3", "SUFU") #sonic hedgehog signaling 
+
+genes <- c("RAC3","ARHGAP35","DOCK1","WASF2","VEGFA","TIAM1","FGF2","THBS3","LAMA1","LAMA5","SV2A","COL9A1","COMP","TNR","LAMA3","ITGA3","SNAI2","CRB1","WNT3","FZD1","APC2","LMNA","PLEC","ACTB","ILK","VCL") # Wang paper, mechanotransduction, YAP, WNT3A not in rownames
+genes <- c("GFAP","VIM","ACTB","PLEC","DST","ITGA6","ITGB4","LAMA5","FAT1","STK3","STK4", "YAP1", "LMNA")
+
+celltype <- "iA_ASTRO_3"
+#seurat.object <- readRDS("iPSC_iA/seurat_iA_filtered_mt_rib.rds")
+seurat.object <- subset(seurat_iA, ident = "ASTRO_3")
+levels(as.factor(seurat.object@meta.data[["Sample"]]))
+conditions <- list(list("Ctrl_wt","Ctrl_AxD"),list("Ctrl_wt","Ctrl_w_a"),list("Ctrl_w_a","Ctrl_AxD"),
+                  list("OGD_wt","OGD_AxD"),list("OGD_wt","OGD_w_a"),list("OGD_w_a","OGD_AxD"),
+                  list("Ctrl_wt","OGD_wt"),list("Ctrl_w_a","OGD_w_a"),list("Ctrl_AxD","OGD_AxD"))
+
+Idents(seurat.object) <- seurat.object@meta.data[["Sample"]]
+DE_tests_name <- paste0("DE_", celltype)
+DE_tests <- DEtests2(seurat.object, conditions, gene.list = genes)
+saveRDS(DE_tests, paste0("iPSC_iA/DEA_genes/",DE_tests_name, "_selection.rds"))
+
+file.xlsx <- paste0("iPSC_iA/DEA_genes/",celltype, "_selection.xlsx")
+condition_names <- names(DE_tests)
+write.xlsx("empty", file.xlsx, sheetName = "1", append = FALSE)
+for (condition in condition_names){
+  write.xlsx(DE_tests[[condition]], file.xlsx, sheetName = condition, append = TRUE)
+}
+
+#Vln Plots with significance (RNA assay data)
+levels(as.factor(seurat.object$Sample))
+seurat.object$Sample <- factor(x = seurat.object$Sample, levels=c("Ctrl_wt","Ctrl_w_a","Ctrl_AxD","OGD_wt","OGD_w_a","OGD_AxD"))
+
+#genes <- c("GJA1","THBS1","S100B","TSPO","JUN","ACTB","LAMB2","VCL","ATP1B2","THBS2","THBS3","THBS4")
+subset.seurat <- seurat.object[c(genes)]
+
+for (gene in genes){
+  counts <- as.data.frame(t(as.data.frame(subset.seurat[gene]@assays[["RNA"]]@data)))
+  meta.data <- as.data.frame(subset.seurat[gene]$Sample)
+  plot.data <- merge(counts,meta.data, by = "row.names")
+  rownames(plot.data) <- plot.data[,1]; plot.data["ident"] <- plot.data[3]
+  plot.data <- plot.data[-c(1,3)]
+  plot.data[gene] <- sapply(plot.data[gene], as.numeric)
+  
+  p <- VlnPlot(subset.seurat, features = gene, group.by = "Sample",assay = "RNA", pt.size = 0.5)  
+  p <- p +  
+    theme(axis.title = element_text(size = 18),
+          axis.text = element_text(size = 18),
+          plot.title = element_text(size = 18)) +
+    ylim(0,max(p$data[,1])+7) +
+    NoLegend() +
+    geom_signif(data=plot.data,
+      comparisons = list(c("Ctrl_wt", "Ctrl_AxD"),c("Ctrl_wt","Ctrl_w_a"),c("Ctrl_w_a","Ctrl_AxD")),
+      map_signif_level = T,
+      test = "t.test",
+      step_increase = 0.2,
+      margin_top = 0.1,
+      size = 1,
+      textsize = 6) +
+    geom_signif(data=plot.data,
+      comparisons = list(c("OGD_wt","OGD_AxD"),c("OGD_wt","OGD_w_a"),c("OGD_w_a","OGD_AxD"),
+                         c("Ctrl_wt","OGD_wt"),c("Ctrl_w_a","OGD_w_a"),c("Ctrl_AxD","OGD_AxD")),
+      map_signif_level = T,
+      test = "t.test",
+      step_increase = 0.2,
+      margin_top = 0.1,
+      size = 1,
+      textsize = 6)
+    p
+    ggsave(plot = p, filename = paste0("iPSC_iA/DEA_genes/plot_",celltype,"_",gene,".png"), 
+           device = "png", height = 7, width = 10)
+}
+
+
+```
