@@ -1788,3 +1788,39 @@ proportion_test_func(seurat.object = "cerebral/seurat_subset_cerebral.rds",
 proportion_test_func(seurat.object = "cortical_integrated/seurat_cortical_integrated.rds",
                      cluster_identity = "clusters_annot", sample_identity = "Sample", plot_title = "Cortical organoids")
 ```
+# Organoid quantification
+Quantification plots of immunostaining in Fig. 5 and Fig. 6.
+```{r org_quant}
+dir <- dir("240610_figs_revision", pattern = "Fig6")
+df.list2 <- list()
+for (i in dir){
+  df <- as.data.frame(read.table(paste0("240610_figs_revision/",i), header = T, sep = ""))
+  name <- gsub(".txt","",i)
+  name <- gsub("Fig6_","",name)
+  colnames(df) <- c("sample","vals")
+  df$sample <- factor(df$sample, levels = c("CTRL","AxD"))
+  df.list2[[name]] <- df
+} 
+
+boxplot_custom <- function(df,x,y,fill,title){
+  ggplot(data=df, aes(x=x,y=y,fill=fill)) + geom_boxplot(outlier.shape = NA) + geom_jitter(size = 2, width = 0.15) +
+  theme_light() +
+  theme(axis.title.x = element_blank(),
+        legend.position = "none",
+        axis.text = element_text(size = 16, colour = "black"),
+        #axis.text.x = element_blank(),
+        axis.line = element_line(linewidth = 0.5),
+        axis.ticks = element_line(linewidth = 0.5, colour = "black"),
+        axis.ticks.x = element_blank()
+        ) +
+  scale_fill_manual(values = c("#4472C4","#FFC000")) +
+  ylab(title) +
+  scale_y_continuous(expand = c(0,0), limits = c(0,1.2*max(y))) +
+  stat_compare_means(method = "wilcox.test", label = "p.signif", label.x = 1.5, size = 5, label.y = 1.01*max(df[,2]), 
+                      hide.ns = F, paired = F, comparisons = list(c("CTRL","AxD")))
+}
+
+plot.list2 <- lapply(seq_along(df.list2), function(x) boxplot_custom(df = df.list2[[x]], x = df.list2[[x]]$sample, y = df.list2[[x]]$vals, fill = df.list2[[x]]$sample, title = names(df.list2)[x]))
+
+ggsave("Fig6_quantif_revision.svg", device = "svg", width = 5, height = 3, plot = cowplot::plot_grid(align = "v", ncol = 2, plotlist = plot.list2) %>% print())
+```

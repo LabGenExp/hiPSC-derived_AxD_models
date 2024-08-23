@@ -108,10 +108,10 @@ seurat.object <- readRDS("seurat_all_merged_filtered_mt_rib.rds")
 DimPlot(seurat.object, group.by = "cell_type_joined", pt.size = 1)
 seurat.object@active.ident <- seurat.object$cell_type_joined
 seurat.object <- RenameIdents(seurat.object, 
-                              "EPCAM/CDH1" = "Precursors",
-                              "PRE-ASTRO" = "Precursors",
-                              "PRE-NEURO" = "Precursors",
-                              "DCX/STMN1" = "Precursors",
+                              "EPCAM/CDH1" = "AxD cluster",
+                              "PRE-ASTRO" = "AxD cluster",
+                              "PRE-NEURO" = "AxD cluster",
+                              "DCX/STMN1" = "AxD cluster",
                               "ASTRO_1" = "ASTRO 1",
                               "ASTRO_2" = "ASTRO 2",
                               "ASTRO_3" = "ASTRO 3",
@@ -160,7 +160,7 @@ precursors <- c("EPCAM","CDH1","CLDN7","KRT18","KRT8")
 gene.set <- c(precursors, astro, neuro)
 #gene.set <- unique(gene.set)
 
-seurat.object@active.ident <- factor(seurat.object@active.ident, levels = c("Precursors","Astrocytes","Neurons"))
+seurat.object@active.ident <- factor(seurat.object@active.ident, levels = c("AxD cluster","Astrocytes","Neurons"))
 
 p.dot <- DotPlot(seurat.object, features = gene.set) +
   scale_color_gradient(high = "#8c0052", low = "#e0e0e0") +
@@ -296,11 +296,11 @@ p <- VlnPlot(seurat_iA, features = "GFAP", cols = myCol.a, pt.size = 0) + NoLege
 ggsave("Fig1F_violin.png", plot = p, device = "png", height = 4, width = 3.5)
 ```
 
-1G: ORA precursors
+1G: ORA AxD cells
 ```{r}
 seurat.object@active.ident <- seurat.object$clusters_1B
 seurat.object@active.assay <- "RNA"
-markers.precursors <- FindMarkers(seurat.object, ident.1 = "Precursors", min.pct = 0.1, logfc.threshold = 0.25)
+markers.precursors <- FindMarkers(seurat.object, ident.1 = "AxD cluster", min.pct = 0.1, logfc.threshold = 0.25)
 markers.precursors <- markers.precursors[abs(markers.precursors$avg_log2FC) > 1 & markers.precursors$p_val_adj < 0.05,]
 write(rownames(markers.precursors[markers.precursors$avg_log2FC > 1,]), "markers_precursors_UP.txt")
 write(rownames(markers.precursors[markers.precursors$avg_log2FC < -1,]), "markers_precursors_DOWN.txt")
@@ -340,23 +340,26 @@ p <- dotplot(out, showCategory = 5, by = "GeneRatio", includeAll = F, label_form
         plot.title = element_text(size = 16, face = "bold", hjust = 0.75)) + 
   ggtitle("GO Terms Enrichment in Precursors")
 p
-ggsave(plot = p, filename = "Fig1G_precursors_ORA_dotplot.png", device = "png", bg = "white", height = 4.5, width = 8)
+ggsave(plot = p, filename = "Fig1G_AxDcluster_ORA_dotplot.png", device = "png", bg = "white", height = 4.5, width = 8)
 ```
 
 # Fig 2B,D,E
 ```{r}
-df1 <- read.table("Fig2BD_data.txt", header = T, sep = ",")
-df2 <- read.table("Fig2E_data.txt", header = T, sep = ",")
+df.list <- list()
+for (i in dir){
+  df <- as.data.frame(read.table(paste0("240610_figs_revision/",i), header = T, sep = ""))
+  name <- substr(i,7,nchar(i)-15)
+  colnames(df) <- c("sample","experiment","vals")
+  df$sample <- factor(df$sample, levels = c("wt","wa"))
+  df.list[[name]] <- df
+} 
 
-df1$condit <- factor(df1$condit, levels = c("astroC/neuroC","astroAxD/neuroC"))
-df2$condit <- factor(df1$condit, levels = c("astroC/neuroC","astroAxD/neuroC"))
-barplot_custom <- function(df,x,y,fill,SEM,title){
-  ggplot(data=df, aes(x=x,y=y,fill=fill)) + geom_bar(stat="identity", width = 0.7) +
-  geom_errorbar(aes(ymin=y-SEM, ymax=y+SEM), width=.2) +
-  theme_light() + 
+boxplot_custom <- function(df,x,y,fill,title){
+  ggplot(data=df, aes(x=x,y=y,fill=fill)) + geom_boxplot(outlier.shape = NA) + geom_jitter(size = 1, width = 0.15) +
+  theme_light() +
   theme(axis.title.x = element_blank(),
         legend.position = "none",
-        axis.text = element_text(size = 11, colour = "black"),
+        axis.text = element_text(size = 16, colour = "black"),
         axis.text.x = element_blank(),
         axis.line = element_line(linewidth = 0.5),
         axis.ticks = element_line(linewidth = 0.5, colour = "black"),
@@ -364,28 +367,46 @@ barplot_custom <- function(df,x,y,fill,SEM,title){
         ) +
   scale_fill_manual(values = c("#4472C4","#FFC000")) +
   ylab(title) +
-  scale_y_continuous(expand = c(0,0), limits = c(0,1.5*max(y)))
+  scale_y_continuous(expand = c(0,0), limits = c(0,1.2*max(y))) +
+  stat_compare_means(method = "t.test", label = "p.signif", label.x = 1.5, size = 5, label.y = 1.01*max(df[,3]), 
+                      hide.ns = F, paired = F, comparisons = list(c("wt","wa")))
 }
 
-ggsave("Fig2_barplots.svg", device = "svg", width = 5, height = 4, plot = 
-  #gridExtra::grid.arrange(
-   cowplot::plot_grid(align = "v", nrow = 2,
-    barplot_custom(df1, x = df1$condit, y = df1$undif, fill = df1$condit, SEM = df1$undif_err, 
-                   title = expression("Undifferentiated cells/mm"^"2")) + annotate(geom = "text", label = "****",
-                                                                                   x = 2, y = 6.5),
-    barplot_custom(df1, x = df1$condit, y = df1$MAP2, fill = df1$condit, SEM = df1$MAP2_err, 
-                   title = expression("MAP2+ cells/mm"^"2")),
-    barplot_custom(df1, x = df1$condit, y = df1$Vim, fill = df1$condit, SEM = df1$Vim_err, 
-                   title = expression("Vimentin+ cells/mm"^"2")),
-    barplot_custom(df1, x = df1$condit, y = df1$GFAP, fill = df1$condit, SEM = df1$GFAP_err, 
-                   title = expression("GFAP+ cells/mm"^"2")),
-    barplot_custom(df2, x = df2$condit, y = df2$circ, fill = df2$condit, SEM = df2$circ_SEM, 
-                   title = "Circularity") + annotate(geom = "text", label = "****", x = 2, y = 0.22),
-    barplot_custom(df2, x = df2$condit, y = df2$perim, fill = df2$condit, SEM = df2$perim_SEM, 
-                   title = expression(paste("Perimeter (", mu, "m)"))) + annotate(geom = "text", label = "****", 
-                                                                               x = 2, y = 630)
-    ) %>% print()
-)
+plot.list1 <- lapply(seq_along(df.list), function(x) boxplot_custom(df = df.list[[x]], x = df.list[[x]]$sample, y = df.list[[x]]$vals, fill = df.list[[x]]$sample, title = names(df.list)[x]))
+grid.arrange(grobs = plot.list1)
+
+# 2E
+df.list2 <- list()
+for (i in dir){
+  df <- as.data.frame(read.table(paste0("240610_figs_revision/",i), header = T, sep = ""))
+  name <- substr(i,7,nchar(i)-9)
+  colnames(df) <- c("sample","vals")
+  df$sample <- factor(df$sample, levels = c("wt","wa"))
+  df.list2[[name]] <- df
+} 
+
+boxplot_custom <- function(df,x,y,fill,title){
+  ggplot(data=df, aes(x=x,y=y,fill=fill)) + geom_boxplot(outlier.shape = NA) + geom_jitter(size = 1, width = 0.15) +
+  theme_light() +
+  theme(axis.title.x = element_blank(),
+        legend.position = "none",
+        axis.text = element_text(size = 16, colour = "black"),
+        axis.text.x = element_blank(),
+        axis.line = element_line(linewidth = 0.5),
+        axis.ticks = element_line(linewidth = 0.5, colour = "black"),
+        axis.ticks.x = element_blank()
+        ) +
+  scale_fill_manual(values = c("#4472C4","#FFC000")) +
+  ylab(title) +
+  scale_y_continuous(expand = c(0,0), limits = c(0,1.2*max(y))) +
+  stat_compare_means(method = "wilcox.test", label = "p.format", label.x = 1.5, size = 5, label.y = 1.01*max(df[,2]), 
+                      hide.ns = F, paired = F, comparisons = list(c("wt","wa")))
+}
+
+plot.list2 <- lapply(seq_along(df.list2), function(x) boxplot_custom(df = df.list2[[x]], x = df.list2[[x]]$sample, y = df.list2[[x]]$vals, fill = df.list2[[x]]$sample, title = names(df.list2)[x]))
+
+plot.list <- c(plot.list1,plot.list2)
+ggsave("Fig2_barplots_revision.svg", device = "svg", width = 6, height = 5, plot = cowplot::plot_grid(align = "v", nrow = 2, plotlist = plot.list) %>% print())
 ```
 
 # Fig 3
@@ -540,12 +561,12 @@ dev.off()
 # Fig 4
 4B: Barplot
 ```{r}
-df3 <- read.table("Fig4_data.txt", header = T, sep = ",")
-df3$condit <- factor(df3$condit, levels = c("astroC/neuroC","astroAxD/neuroC"))
+df3 <- read.table("Fig4B_ldh_revised.txt", header = T, sep = "")
+df3$sample <- factor(df3$sample, levels = c("wt","wa"))
+df3$treatment <- factor(df3$treatment, levels = c("ctrl","ogd"))
 
-p <- ggplot(data=df3, aes(x=condit,y=AVG,fill=stressed)) + geom_bar(stat="identity", width = 0.7, position = position_dodge(preserve = "single")) +
-  geom_errorbar(aes(ymin=AVG-ERR, ymax=AVG+ERR), width=.2, position = position_dodge(.7)) +
-  theme_light() + 
+p <- ggplot(data=df3, aes(x=sample,y=vals,fill=treatment)) + geom_boxplot(outlier.shape = NA, position = position_dodge(preserve = "single")) + geom_point(position=position_jitterdodge(dodge.width=0.7, jitter.width = 0.15)) +
+  theme_light() +
   theme(axis.title.x = element_blank(),
         axis.title.y = element_text(size = 16),
         legend.position = c(0.15,0.85),
@@ -556,10 +577,11 @@ p <- ggplot(data=df3, aes(x=condit,y=AVG,fill=stressed)) + geom_bar(stat="identi
         axis.ticks = element_line(linewidth = 1, colour = "black")
         ) +
   scale_fill_manual(values = c("#4472C4","#FF0000")) +
-  scale_y_continuous(expand = c(0,0), limits = c(0,1.2*max(df3$AVG))) +
-  ylab("Cell death (% LDH release)") + 
-  annotate(geom = "text", label = "***", x = 2, y = 12, size = 9)
-ggsave("Fig4B_barplots.png", plot = p, device = "png")
+  scale_y_continuous(expand = c(0,0), limits = c(0,1.2*max(df3$vals))) +
+  ylab("Cell death (% LDH release)")
+p
+ggsave("Fig4B_barplots.svg", plot = p, device = "svg", width = 4, height = 3)
+
 ```
 
 4C: Table Heatmap
@@ -575,7 +597,7 @@ names(DEGs) <- c("iA","iN","precursors")
 DEG.num <- unlist(lapply(DEGs, function(x) x = sapply(x, FUN = nrow)))
 
 dt <- cbind(c(0,4),c(0,8),c(1,14))
-colnames(dt) <- c("iN","iA","precursors")
+colnames(dt) <- c("iN","iA","AxD cluster")
 rownames(dt) <- c("astroC/neuroC","astroAxD/neuroC")
 
 dt <- melt(dt)
@@ -702,6 +724,98 @@ p5 <- FeaturePlot(seurat_annotated, features = c("percent.mt","MALAT1"), min.cut
 ggsave("Supp_Fig1D_MALATmt.png", plot = p5, device = "png", width = 5, height = 10) 
 ```
 
+Supp 1E - metaanalysis
+Use Zeng 2023 https://doi.org/10.1016/j.stem.2023.04.016 as a reference and find a signature of other germ layers and tissues in our co-culture dataset, focusing specifically on the AxD cluster.
+```{r}
+data <- read.table("Zeng2023_earlydev/cluster_markers.txt", header = T, sep = ",")
+data$celltype <- as.factor(data$celltype)
+
+for (i in levels(data$celltype)){
+  goi <- data[data$celltype == i,] %>% arrange(desc(logfoldchanges))
+  gene_list <- goi$names
+  write(paste0("Zeng2023_earlydev/markers",i,".txt"), x = gene_list)
+}
+
+seurat <- readRDS("seurat_all_merged_filtered_mt_rib.rds")
+
+dir <- dir("Zeng2023_earlydev/markers", pattern = ".txt") 
+dir.link <- "Zeng2023_earlydev/markers/" 
+
+pdf("Zeng2023_earlydev/reference.pdf", width = 20, height = 10)
+for(i in 1:length(dir)){
+  gene.set <- as.vector(read.table(paste0(dir.link,dir[i]), header = F)[,1])
+  if (length(gene.set) > 0) {
+    print(paste("AddModuleScore", dir[i], "running...", sep = " "))
+    seurat.scored <- AddModuleScore(seurat, features = list(gene.set) %>% head(n=20), assay = "RNA", name = "reference_score_")
+    p <- FeaturePlot(seurat.scored, features = "reference_score_1", 
+                     min.cutoff = "q10", max.cutoff = "q90", reduction = "umap", split.by = "Genotype") +
+      ggtitle(gsub(".txt", "", dir[i]))
+    print(p) 
+    rm(seurat.scored)
+  }
+}
+dev.off()
+```
+
+Enrichment analysis
+```{r}
+seurat <- readRDS("seurat_all_merged_filtered_mt_rib.rds")
+data <- read.table("Zeng2023_earlydev/cluster_markers_TabS2.txt", header = T, sep = ",", )
+data$celltype <- as.factor(data$celltype)
+Term2Gene <- data.frame(ID = data$celltype,
+                        Gene = data$Gene) 
+                        #Gene = data$names)
+
+markers <- read.table("Fig1_markers_precursors_UP.txt", header = F)[,1]
+
+erch <- enricher(gene = markers,
+                 universe = seurat@assays[["RNA"]]@counts[rowSums(seurat@assays[["RNA"]]) > 0,] %>% row.names,
+                 pAdjustMethod = "fdr",
+                 pvalueCutoff = 0.1,
+                 qvalueCutoff = 0.2,
+                 maxGSSize = 800, 
+                 minGSSize = 5,
+                 TERM2GENE = Term2Gene)
+
+# barplot with custom enrichment analysis results
+custom_bar_plot <- function(res,name,ncat){
+  data <- res@result
+  data$log.p.adj <- -log10(data$p.adjust) 
+  data <- data[order(data$log.p.adj, decreasing = T)[1:ncat],c("Description","p.adjust","log.p.adj")]
+  
+  enrich.bar <- ggplot(data = data, aes(x = log.p.adj, y = reorder(Description,log.p.adj), fill = p.adjust)) + 
+  geom_bar(stat = "identity", width = 0.9) +
+  theme_void() +
+  theme(axis.text.x = element_text(angle = 0, size = 14, vjust = -0.5, hjust = 0.5), 
+        axis.text.y = element_text(size=16, margin = margin(r = 0.2, unit = "cm")),
+        axis.line.x = element_line(linewidth = 1, lineend = "square"), 
+        axis.line.y = element_blank(),
+        axis.title.x = element_text(size = 14, vjust = -2),
+        axis.title.y = element_blank(),
+        axis.ticks.x = element_line(linewidth = 1, color = "black"),
+        axis.ticks.length = unit(0.1, "cm"),
+        axis.ticks.y = element_blank(),
+        legend.position = "none",
+        plot.title = element_text(size = 16, hjust = 0.5, vjust = 2, face = "bold"),
+        plot.margin = margin(l = 0.5, r=0.5, b = 0.5, t = 0.5, unit = "cm")) +
+  scale_x_continuous(limits = c(0, 25)) +
+  coord_capped_cart(bottom = "both") +
+   
+  ggtitle(paste0("Enrichment analysis", name)) + 
+  xlab(expression("-Log"[10]*"(p"[adj]*")")) +
+  scale_fill_gradientn(colors = c("#fde725","#5ec962","#31688e"))
+  
+  return(enrich.bar)
+}  
+
+erch@result <- erch@result[erch@result$p.adjust < 0.2,]  
+p <- custom_bar_plot(erch, ": Zeng et al. 2023", length(rownames(erch@result)))
+p
+ggsave(plot = p, 
+       filename = "Zeng2023_earlydev/enrichment_Zeng.svg", 
+       device = "svg", width = 6, height = 3)
+```
+
 # Supplement 2
 Supp A-C
 ```{r}
@@ -793,7 +907,7 @@ p.dot <- DotPlot(seurat_iN, features = c(`NEURO 1`,`NEURO 2`,`NEURO 3`,`NEURO 4`
 p.dot
 ggsave("Supp_Fig2B_marker_iN.png", device = "png", height = 3, width = 7, bg = "#FFFFFF")
 
-# C precursors
+# C AxD cluster
 DimPlot(seurat_iPSC)
 brewer.pal(9, "Greens")
 display.brewer.pal(9, "Greens")
