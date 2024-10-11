@@ -1,5 +1,5 @@
 # hiPSC-derived_AxD_models
-This repository contains code used to process and analyze two scRNA-seq datasets prepared from co-culture and organoid models of Alexander disease. Samples were processed using the 10X Genomics platform. The data have been deposited in Gene Expression Omnibus under accession number GSE261158. In August 2024, the code has been updated with changes related to revision of the related manuscript.
+This repository contains code used to process and analyze two scRNA-seq datasets prepared from co-culture and organoid models of Alexander disease. Samples were processed using the 10X Genomics platform. The data have been deposited in Gene Expression Omnibus under accession number GSE261158. In August 2024, the code has been updated with changes related to revision of the related manuscript. _Aberrant neurodevelopment in human iPS cell-derived models of Alexander disease_ is now published in Glia journal at: https://onlinelibrary.wiley.com/doi/full/10.1002/glia.24618.
 
 The repository includes the following folders and files:
 
